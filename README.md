@@ -80,4 +80,4 @@ docker compose up -d proxyloom
 
 Copyright (C) 2026 ProxyLoom contributors.
 
-本项目计划以 GNU Affero General Public License v3.0 or later 发布，详见 [LICENSE](./LICENSE)。第三方执行器和依赖分别遵守各自许可证。
+本项目以 GNU Affero General Public License v3.0 or later（`AGPL-3.0-or-later`）发布，详见 [LICENSE](./LICENSE)。第三方执行器和依赖分别遵守各自许可证。
