@@ -1,0 +1,1471 @@
+schema_version: 1
+matrix_version: 0.7.0-m4-cross-format
+document_status: implementation_tracking
+generated_at: '2026-07-18T00:00:00Z'
+implementation_status: m4_controlled_preview
+statement: >-
+  This inventory tracks intended scope and independently verified capability
+  dimensions. M1/M2 evidence is pre-release implementation evidence, not a claim of
+  production readiness, real health execution, cross-format rendering or target
+  binary validation unless each dimension is separately evidenced.
+
+implementation_evidence:
+  - id: m1-singbox-lossless-slice-v1
+    status: verified_m1_exit
+    format: sing-box-json
+    protocol_ids:
+      - socks
+      - http
+      - shadowsocks
+      - vmess
+      - vless
+      - trojan
+      - wireguard
+      - hysteria
+      - shadowtls
+      - tuic
+      - hysteria2
+      - anytls
+      - tor
+      - ssh
+      - tor
+      - shadowsocksr
+      - opaque.unknown
+    verified_dimensions:
+      recognize: format_and_type_detection
+      lossless_passthrough: ordered_raw_ast_and_minimal_tag_patch
+      normalize: common_metadata_and_m1_protocol_fields
+    acceptance_scenarios: [AC-001, AC-002, AC-003, AC-009, AC-015, AC-019, AC-023]
+    evidence_paths:
+      - internal/format/singbox/document_test.go
+      - internal/build/outbounds_test.go
+      - internal/build/testdata/m1-outbounds.golden.json
+    limitation: >-
+      Protocol-specific current states are upgraded only where the M1 fixtures below
+      satisfy the release gate. Later-phase known protocols remain unchanged.
+  - id: m1-singbox-p0-canonical-identity-v2
+    status: verified_m1_exit
+    format: sing-box-json
+    upstream_profile: sing-box-v1.12.25
+    protocol_ids: [socks, http, shadowsocks, vmess, vless, trojan, hysteria2, tuic, anytls]
+    verified_dimensions:
+      recognize: singbox_type_and_safe_display_metadata
+      lossless_passthrough: per_protocol_raw_node_round_trip
+      normalize: protocol_authentication_tls_transport_and_extensions_subset
+      identity: declared_connection_field_projection
+    evidence_paths:
+      - internal/protocol/testdata/singbox-v1.12.25-canonical.json
+      - internal/protocol/canonical_test.go
+      - internal/protocol/identity_test.go
+      - internal/identity/fingerprint_test.go
+      - internal/build/outbounds_test.go
+    limitation: >-
+      Current capability is partial across the declared multi-format dimension. URI and
+      Mihomo raw adapters are implemented, but their protocol-specific Canonical parsing
+      is not. Canonical parsing is not a cross-format renderer.
+  - id: m2-uri-lossless-container-v1
+    status: verified_m2_slice
+    format: uri-list
+    protocol_ids:
+      - socks
+      - http
+      - shadowsocks
+      - vmess
+      - vless
+      - trojan
+      - wireguard
+      - hysteria
+      - shadowtls
+      - tuic
+      - hysteria2
+      - anytls
+      - ssh
+      - shadowsocksr
+      - naive
+      - snell
+      - mieru
+      - gost-relay
+      - sudoku
+      - masque
+      - trusttunnel
+      - openvpn
+      - tailscale
+      - juicity
+      - opaque.unknown
+    verified_dimensions:
+      recognize: bounded_plain_and_base64_container_with_scheme_classification
+      lossless_passthrough: original_per_node_URI_bytes_and_deterministic_plain_list_render
+      identity: opaque_URI_projection_with_registered_display_fragment_exclusion
+    evidence_paths:
+      - internal/format/urilist/document_test.go
+      - internal/ingest/uri_snapshot_test.go
+      - internal/protocol/registry_test.go
+    limitation: >-
+      Scheme classification is not full protocol validation. VMess legacy JSON only
+      receives a lossless opaque identity projection with ps excluded. URI Canonical,
+      editing, cross-format conversion, health execution and target validation remain
+      not implemented unless separately evidenced below.
+  - id: m2-mihomo-lossless-container-v1
+    status: verified_m2_slice
+    format: mihomo-yaml
+    upstream_profile: mihomo-1.19
+    protocol_ids:
+      - shadowsocks
+      - shadowsocksr
+      - socks
+      - http
+      - vmess
+      - vless
+      - snell
+      - trojan
+      - hysteria
+      - hysteria2
+      - wireguard
+      - tuic
+      - gost-relay
+      - ssh
+      - mieru
+      - anytls
+      - sudoku
+      - masque
+      - trusttunnel
+      - openvpn
+      - tailscale
+      - opaque.unknown
+    verified_dimensions:
+      recognize: bounded_YAML_AST_and_Mihomo_proxy_type_classification
+      lossless_passthrough: exact_document_bytes_when_names_do_not_change
+      edit_convert: same_format_name_only_patch_with_stable_numeric_suffixes
+      identity: opaque_proxy_mapping_projection_with_name_excluded
+    evidence_paths:
+      - internal/format/mihomo/document_test.go
+      - internal/build/mihomo_test.go
+      - internal/service/service_test.go
+    limitation: >-
+      YAML aliases, custom tags and duplicate keys are rejected. A required rename
+      re-encodes the YAML document, so comments and key order are preserved by the AST
+      where possible but byte-for-byte layout is not promised. Proxy providers,
+      protocol Canonical conversion, health execution and target validation remain
+      not implemented.
+  - id: m2-client-text-lossless-container-v1
+    status: verified_m2_slice
+    format: client-text
+    protocol_ids:
+      - shadowsocks
+      - shadowsocksr
+      - socks
+      - http
+      - vmess
+      - vless
+      - trojan
+      - hysteria
+      - hysteria2
+      - tuic
+      - anytls
+      - wireguard
+      - snell
+      - ssh
+      - mieru
+      - opaque.unknown
+    verified_dimensions:
+      recognize: bounded_Surge_Loon_Proxy_and_Quantumult_X_server_local_line_detection
+      lossless_passthrough: exact_full_document_bytes_when_names_do_not_change
+      edit_convert: same_format_display_name_only_patch_with_stable_numeric_suffixes
+      identity: opaque_node_line_projection_with_display_name_excluded
+    evidence_paths:
+      - internal/format/clienttext/document_test.go
+      - internal/build/clienttext_test.go
+      - internal/service/service_test.go
+    limitation: >-
+      This is an opaque same-format adapter for the public line grammars exercised by
+      Surge, Loon and Quantumult X fixtures. It does not claim protocol Canonical
+      conversion, complete client configuration validation, cross-format rendering,
+      health execution or target validation.
+  - id: m4-multi-format-singbox-renderer-v1
+    status: verified_m4_preview
+    formats: [uri-list, mihomo-yaml-json, client-text]
+    target_profiles: [singbox-1.12, singbox-1.13, momo-singbox-1.12]
+    protocol_ids: [http, shadowsocks, vmess, vless, trojan, hysteria2, tuic, anytls, naive]
+    verified_dimensions:
+      normalize: verified_field_subset_with_unknown_field_rejection
+      edit_convert: canonical_node_to_singbox_with_stable_names
+      target_validation: exact_singbox_1.12.25_and_1.13.14_binary_check
+    evidence_paths:
+      - internal/convert/convert_test.go
+      - internal/service/service_test.go
+      - internal/executor/singbox/validator_test.go
+      - docs/m4-status.md
+    limitation: >-
+      Conversion is field-gated rather than scheme-gated. Fields without a verified
+      equivalent reject that node instead of being discarded. In particular,
+      Hysteria2 URI pinSHA256 hashes the full leaf certificate while sing-box
+      certificate_public_key_sha256 hashes the public key and bypasses standard
+      certificate verification. Embedding the observed certificate cannot preserve
+      the intersection of the original CA, hostname and full-certificate pin checks,
+      so those values are not converted. Same-format publication continues to
+      preserve the original bytes.
+  - id: m4-singbox-real-health-executor-v1
+    status: verified_m4_preview
+    executor: sing-box-1.12.25
+    protocol_ids: [http, shadowsocks, vmess, vless, trojan, hysteria2, tuic, anytls]
+    verified_dimensions:
+      real_health_check: isolated_mixed_inbound_https_probe_with_persisted_result
+      failure_guard: mass_failure_suppression_prevents_health_based_filtering
+    evidence_paths:
+      - internal/executor/singbox/probe.go
+      - internal/executor/singbox/validator_test.go
+      - internal/service/service_test.go
+      - docs/m4-status.md
+    limitation: >-
+      Only nodes with a verified sing-box Canonical rendering are executable. The
+      Mihomo executor is not implemented. Results observed while the mass-failure
+      guard is active are retained for diagnostics but cannot drive filtering.
+  - id: m1-core-scale-and-fuzz-v1
+    status: verified_m1_exit
+    verified_dimensions:
+      scale: parser_occurrence_and_name_allocation_at_20000_nodes
+      fuzz: continuous_json_parser_smoke
+    evidence_paths:
+      - internal/format/singbox/benchmark_test.go
+      - internal/occurrence/benchmark_test.go
+      - internal/naming/benchmark_test.go
+      - internal/jsonlossless/jsonlossless_test.go
+      - .github/workflows/ci.yml
+      - docs/M1-EXIT-AUDIT.md
+
+status_vocabulary:
+  current:
+    - not_implemented
+    - partial
+    - implemented
+    - blocked
+    - not_applicable
+  target_phase:
+    - M1
+    - M3
+    - M4
+    - M5
+    - continuous
+    - null
+  required_test_evidence:
+    - detection_fixture
+    - lossless_golden
+    - canonical_parse_fixture
+    - render_fixture
+    - real_probe_fixture
+    - target_binary_fixture
+
+dimensions:
+  recognize: Determine a stable protocol ID and safe display metadata.
+  lossless_passthrough: Preserve the complete native object in the same format family.
+  normalize: Parse connection, authentication, TLS, transport and extension fields.
+  edit_convert: Safely patch and render the protocol to a supported target format.
+  real_health_check: Use a real protocol stack to proxy an HTTPS probe.
+  target_validation: Validate generated output against the declared target profile.
+
+target_profiles:
+  - id: momo-singbox-1.12
+    profile_version: 1
+    client: Momo
+    client_exact_version: v1.2.1
+    core: sing-box
+    core_exact_version: v1.12.25
+    format_family: sing-box-json
+    phase: M4
+    status: p0_baseline
+    source_verification: verified
+  - id: singbox-1.12
+    profile_version: 1
+    client: sing-box
+    client_exact_version: v1.12.25
+    core: sing-box
+    core_exact_version: v1.12.25
+    format_family: sing-box-json
+    phase: M4
+    status: p0_baseline
+    source_verification: verified
+  - id: singbox-1.13
+    profile_version: 1
+    client: sing-box
+    client_exact_version: v1.13.14
+    core: sing-box
+    core_exact_version: v1.13.14
+    format_family: sing-box-json
+    phase: continuous
+    status: compatibility_target
+    source_verification: verified
+  - id: mihomo-1.19
+    profile_version: 1
+    client: Mihomo
+    client_exact_version: v1.19.28
+    core: Mihomo
+    core_exact_version: v1.19.28
+    format_family: mihomo-yaml-json
+    phase: M5
+    status: research_baseline
+    source_verification: verified
+
+format_families:
+  - id: sing-box-json
+    input_phase: M1
+    output_phase: M1
+    lossless_unit: parsed JSON node object
+    display_name_path: /tag
+  - id: uri-list
+    input_phase: M2
+    output_phase: M2
+    implementation_status: lossless_container_and_partial_singbox_conversion_implemented
+    adapter_version: uri-list-v1
+    containers: [plain, base64-standard, base64-url]
+    lossless_unit: original URI bytes
+    display_name_rule: scheme-specific fragment only when registered
+    limitations: [unverified_fields_reject_conversion, hysteria2_pinSHA256_has_no_equivalent]
+  - id: mihomo-yaml-json
+    input_phase: M2
+    output_phase: M2
+    implementation_status: lossless_yaml_and_partial_singbox_conversion_implemented
+    adapter_version: mihomo-yaml-v1
+    lossless_unit: parsed proxy object; comments, anchors and layout excluded
+    display_name_path: /name
+    limitations: [proxy_provider_import_not_implemented, unverified_fields_reject_conversion]
+  - id: client-text
+    input_phase: M2
+    output_phase: M2
+    implementation_status: lossless_native_and_partial_singbox_conversion_implemented
+    adapter_version: client-text-v1
+    containers: [surge-proxy-section, loon-proxy-section, quantumult-x-server-local]
+    lossless_unit: original node line bytes
+    display_name_rule: assignment name or Quantumult X tag field
+    limitations: [full_client_grammar_not_implemented, unverified_fields_reject_conversion]
+
+inventory_policy:
+  upstream_baselines:
+    - sing-box v1.12.25
+    - sing-box v1.13.14 compatibility watch
+    - Momo v1.2.1
+    - Mihomo v1.19.28 research baseline
+  update_rule: >-
+    Compare every new stable upstream release and public protocol report with this
+    inventory. Add an opaque same-format fixture first, then fill dimensions
+    independently. A private protocol without a legal specification or sample is
+    recorded as blocked rather than represented as supported.
+  unknown_protocol_behavior: >-
+    Preserve the native object, assign a namespaced unknown protocol ID, compute an
+    opaque structural fingerprint, and reject semantic conversion. Unknown entries
+    must not abort other nodes in the document.
+
+inventory_sources:
+  - project: sing-box
+    repository: https://github.com/SagerNet/sing-box
+    tag: v1.12.25
+    commit: 73bfb99ebce7923c485435e4faf8571b412065a9
+    inspected_paths: [include/registry.go, constant/proxy.go]
+    verified_at: '2026-07-17'
+  - project: sing-box
+    repository: https://github.com/SagerNet/sing-box
+    tag: v1.13.14
+    commit: 25a600db24f7680ad9806ce5427bd0ab8afe1114
+    verification: tag_resolved_compatibility_inventory_pending
+    verified_at: '2026-07-17'
+  - project: Mihomo
+    repository: https://github.com/MetaCubeX/mihomo
+    tag: v1.19.28
+    commit: cbd11db1e13a75d8e680e0fe7742c95be4cba2be
+    inspected_paths: [adapter/parser.go]
+    verified_at: '2026-07-17'
+  - project: Momo
+    repository: https://github.com/nikkinikki-org/OpenWrt-momo
+    release: https://github.com/nikkinikki-org/OpenWrt-momo/releases/tag/v1.2.1
+    tag: v1.2.1
+    commit: dc0b315030aff15687829e3c411421299d32298a
+    license: GPL-3.0-or-later
+    inspected_paths: [momo/Makefile, luci-app-momo/Makefile, momo/files/momo.init]
+    release_asset:
+      name: momo_x86_64-openwrt-25.12.tar.gz
+      sha256: 63646cbe147f4260cdc21fc69176e8f7100ca41a9d79a07b6a4c2f2ff4493394
+    verification: tag_and_release_asset_verified
+    verified_at: '2026-07-18'
+
+upstream_type_assertions:
+  sing-box-v1.12.25:
+    proxy_outbound_protocol_ids:
+      - socks
+      - http
+      - shadowsocks
+      - vmess
+      - trojan
+      - wireguard
+      - hysteria
+      - vless
+      - shadowtls
+      - tuic
+      - hysteria2
+      - anytls
+      - tor
+      - ssh
+    removed_error_stubs: [shadowsocksr]
+    non_proxy_outbound_types: [direct, block, dns, selector, urltest]
+    endpoint_types: [wireguard, tailscale]
+    service_types: [derp, ssm-api]
+  mihomo-v1.19.28:
+    proxy_type_to_protocol_id:
+      ss: shadowsocks
+      ssr: shadowsocksr
+      socks5: socks
+      http: http
+      vmess: vmess
+      vless: vless
+      snell: snell
+      trojan: trojan
+      hysteria: hysteria
+      hysteria2: hysteria2
+      wireguard: wireguard
+      tuic: tuic
+      gost-relay: gost-relay
+      ssh: ssh
+      mieru: mieru
+      anytls: anytls
+      sudoku: sudoku
+      masque: masque
+      trusttunnel: trusttunnel
+      openvpn: openvpn
+      tailscale: tailscale
+    non_proxy_types: [direct, dns, reject, rematch]
+
+protocols:
+  - protocol_id: socks
+    display_name: SOCKS
+    aliases: [socks5, socks4, socks4a]
+    ecosystems: [sing-box, mihomo, uri]
+    capability:
+      recognize:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [detection_fixture]
+      lossless_passthrough:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [lossless_golden]
+      normalize:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [canonical_parse_fixture]
+      edit_convert:
+        current: not_implemented
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12, mihomo-1.19]
+        evidence: [render_fixture]
+      real_health_check:
+        current: not_implemented
+        target_phase: continuous
+        executors: [sing-box, mihomo]
+        evidence: [real_probe_fixture]
+      target_validation:
+        current: not_implemented
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12, mihomo-1.19]
+        evidence: [target_binary_fixture]
+
+  - protocol_id: http
+    display_name: HTTP CONNECT
+    aliases: [http-proxy, https-proxy]
+    ecosystems: [sing-box, mihomo, uri]
+    capability:
+      recognize:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [detection_fixture]
+      lossless_passthrough:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [lossless_golden]
+      normalize:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [canonical_parse_fixture]
+      edit_convert:
+        current: partial
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12, mihomo-1.19]
+        verified_targets: [momo-singbox-1.12, singbox-1.12, singbox-1.13]
+        evidence: [render_fixture, target_binary_fixture]
+      real_health_check:
+        current: partial
+        target_phase: continuous
+        executors: [sing-box, mihomo]
+        verified_executors: [sing-box-1.12.25]
+        evidence: [real_probe_fixture]
+      target_validation:
+        current: partial
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12, mihomo-1.19]
+        verified_targets: [momo-singbox-1.12, singbox-1.12, singbox-1.13]
+        evidence: [target_binary_fixture]
+
+  - protocol_id: shadowsocks
+    display_name: Shadowsocks
+    aliases: [ss, sip002]
+    ecosystems: [sing-box, mihomo, uri]
+    capability:
+      recognize:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [detection_fixture]
+      lossless_passthrough:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [lossless_golden]
+      normalize:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [canonical_parse_fixture]
+      edit_convert:
+        current: partial
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12, mihomo-1.19]
+        verified_targets: [momo-singbox-1.12, singbox-1.12, singbox-1.13]
+        evidence: [render_fixture, target_binary_fixture]
+      real_health_check:
+        current: partial
+        target_phase: M3
+        executors: [sing-box, mihomo]
+        verified_executors: [sing-box-1.12.25]
+        evidence: [real_probe_fixture]
+      target_validation:
+        current: partial
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12, mihomo-1.19]
+        verified_targets: [momo-singbox-1.12, singbox-1.12, singbox-1.13]
+        evidence: [target_binary_fixture]
+
+  - protocol_id: vmess
+    display_name: VMess
+    aliases: [vmess-aead]
+    ecosystems: [sing-box, mihomo, uri]
+    capability:
+      recognize:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [detection_fixture]
+      lossless_passthrough:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [lossless_golden]
+      normalize:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [canonical_parse_fixture]
+      edit_convert:
+        current: partial
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12, mihomo-1.19]
+        verified_targets: [momo-singbox-1.12, singbox-1.12, singbox-1.13]
+        evidence: [render_fixture, target_binary_fixture]
+      real_health_check:
+        current: partial
+        target_phase: M3
+        executors: [sing-box, mihomo]
+        verified_executors: [sing-box-1.12.25]
+        evidence: [real_probe_fixture]
+      target_validation:
+        current: partial
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12, mihomo-1.19]
+        verified_targets: [momo-singbox-1.12, singbox-1.12, singbox-1.13]
+        evidence: [target_binary_fixture]
+
+  - protocol_id: vless
+    display_name: VLESS
+    aliases: []
+    ecosystems: [sing-box, mihomo, uri]
+    capability:
+      recognize:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [detection_fixture]
+      lossless_passthrough:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [lossless_golden]
+      normalize:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [canonical_parse_fixture]
+      edit_convert:
+        current: partial
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12, mihomo-1.19]
+        verified_targets: [momo-singbox-1.12, singbox-1.12, singbox-1.13]
+        evidence: [render_fixture, target_binary_fixture]
+      real_health_check:
+        current: partial
+        target_phase: M3
+        executors: [sing-box, mihomo]
+        verified_executors: [sing-box-1.12.25]
+        evidence: [real_probe_fixture]
+      target_validation:
+        current: partial
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12, mihomo-1.19]
+        verified_targets: [momo-singbox-1.12, singbox-1.12, singbox-1.13]
+        evidence: [target_binary_fixture]
+
+  - protocol_id: trojan
+    display_name: Trojan
+    aliases: [trojan-go]
+    ecosystems: [sing-box, mihomo, uri]
+    notes:
+      - Trojan-Go transport extensions are tracked as adapter fields, not assumed equivalent.
+    capability:
+      recognize:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [detection_fixture]
+      lossless_passthrough:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [lossless_golden]
+      normalize:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [canonical_parse_fixture]
+      edit_convert:
+        current: partial
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12, mihomo-1.19]
+        verified_targets: [momo-singbox-1.12, singbox-1.12, singbox-1.13]
+        evidence: [render_fixture, target_binary_fixture]
+      real_health_check:
+        current: partial
+        target_phase: M3
+        executors: [sing-box, mihomo]
+        verified_executors: [sing-box-1.12.25]
+        evidence: [real_probe_fixture]
+      target_validation:
+        current: partial
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12, mihomo-1.19]
+        verified_targets: [momo-singbox-1.12, singbox-1.12, singbox-1.13]
+        evidence: [target_binary_fixture]
+
+  - protocol_id: hysteria2
+    display_name: Hysteria 2
+    aliases: [hy2]
+    ecosystems: [sing-box, mihomo, uri]
+    capability:
+      recognize:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [detection_fixture]
+      lossless_passthrough:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [lossless_golden]
+      normalize:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [canonical_parse_fixture]
+      edit_convert:
+        current: partial
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12, mihomo-1.19]
+        verified_targets: [momo-singbox-1.12, singbox-1.12, singbox-1.13]
+        evidence: [render_fixture, target_binary_fixture]
+      real_health_check:
+        current: partial
+        target_phase: M3
+        executors: [sing-box, mihomo]
+        verified_executors: [sing-box-1.12.25]
+        evidence: [real_probe_fixture]
+      target_validation:
+        current: partial
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12, mihomo-1.19]
+        verified_targets: [momo-singbox-1.12, singbox-1.12, singbox-1.13]
+        evidence: [target_binary_fixture]
+
+  - protocol_id: tuic
+    display_name: TUIC
+    aliases: [tuic-v5]
+    ecosystems: [sing-box, mihomo, uri]
+    capability:
+      recognize:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [detection_fixture]
+      lossless_passthrough:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [lossless_golden]
+      normalize:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [canonical_parse_fixture]
+      edit_convert:
+        current: partial
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12, mihomo-1.19]
+        verified_targets: [momo-singbox-1.12, singbox-1.12, singbox-1.13]
+        evidence: [render_fixture, target_binary_fixture]
+      real_health_check:
+        current: partial
+        target_phase: M3
+        executors: [sing-box, mihomo]
+        verified_executors: [sing-box-1.12.25]
+        evidence: [real_probe_fixture]
+      target_validation:
+        current: partial
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12, mihomo-1.19]
+        verified_targets: [momo-singbox-1.12, singbox-1.12, singbox-1.13]
+        evidence: [target_binary_fixture]
+
+  - protocol_id: anytls
+    display_name: AnyTLS
+    aliases: []
+    ecosystems: [sing-box, mihomo, uri]
+    capability:
+      recognize:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [detection_fixture]
+      lossless_passthrough:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [lossless_golden]
+      normalize:
+        current: partial
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [canonical_parse_fixture]
+      edit_convert:
+        current: partial
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12, mihomo-1.19]
+        verified_targets: [momo-singbox-1.12, singbox-1.12, singbox-1.13]
+        evidence: [render_fixture, target_binary_fixture]
+      real_health_check:
+        current: partial
+        target_phase: M3
+        executors: [sing-box, mihomo]
+        verified_executors: [sing-box-1.12.25]
+        evidence: [real_probe_fixture]
+      target_validation:
+        current: partial
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12, mihomo-1.19]
+        verified_targets: [momo-singbox-1.12, singbox-1.12, singbox-1.13]
+        evidence: [target_binary_fixture]
+
+  - protocol_id: wireguard
+    display_name: WireGuard
+    aliases: [wg]
+    ecosystems: [sing-box, mihomo]
+    capability:
+      recognize:
+        current: not_implemented
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [detection_fixture]
+      lossless_passthrough:
+        current: not_implemented
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [lossless_golden]
+      normalize:
+        current: not_implemented
+        target_phase: M4
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [canonical_parse_fixture]
+      edit_convert:
+        current: not_implemented
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12, mihomo-1.19]
+        evidence: [render_fixture]
+      real_health_check:
+        current: not_implemented
+        target_phase: continuous
+        executors: [sing-box, mihomo]
+        evidence: [real_probe_fixture]
+      target_validation:
+        current: not_implemented
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12, mihomo-1.19]
+        evidence: [target_binary_fixture]
+
+  - protocol_id: hysteria
+    display_name: Hysteria 1
+    aliases: [hy1]
+    ecosystems: [sing-box, mihomo, uri]
+    capability:
+      recognize:
+        current: not_implemented
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [detection_fixture]
+      lossless_passthrough:
+        current: not_implemented
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [lossless_golden]
+      normalize:
+        current: not_implemented
+        target_phase: M4
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [canonical_parse_fixture]
+      edit_convert:
+        current: not_implemented
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12, mihomo-1.19]
+        evidence: [render_fixture]
+      real_health_check:
+        current: not_implemented
+        target_phase: continuous
+        executors: [sing-box, mihomo]
+        evidence: [real_probe_fixture]
+      target_validation:
+        current: not_implemented
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12, mihomo-1.19]
+        evidence: [target_binary_fixture]
+
+  - protocol_id: shadowtls
+    display_name: ShadowTLS
+    aliases: []
+    ecosystems: [sing-box]
+    capability:
+      recognize:
+        current: not_implemented
+        target_phase: M1
+        formats: [sing-box-json]
+        evidence: [detection_fixture]
+      lossless_passthrough:
+        current: not_implemented
+        target_phase: M1
+        formats: [sing-box-json]
+        evidence: [lossless_golden]
+      normalize:
+        current: not_implemented
+        target_phase: M4
+        formats: [sing-box-json]
+        evidence: [canonical_parse_fixture]
+      edit_convert:
+        current: not_implemented
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12]
+        evidence: [render_fixture]
+      real_health_check:
+        current: not_implemented
+        target_phase: continuous
+        executors: [sing-box]
+        evidence: [real_probe_fixture]
+      target_validation:
+        current: not_implemented
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12]
+        evidence: [target_binary_fixture]
+
+  - protocol_id: ssh
+    display_name: SSH
+    aliases: []
+    ecosystems: [sing-box, mihomo]
+    capability:
+      recognize:
+        current: not_implemented
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [detection_fixture]
+      lossless_passthrough:
+        current: not_implemented
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [lossless_golden]
+      normalize:
+        current: not_implemented
+        target_phase: M4
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [canonical_parse_fixture]
+      edit_convert:
+        current: not_implemented
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12, mihomo-1.19]
+        evidence: [render_fixture]
+      real_health_check:
+        current: not_implemented
+        target_phase: continuous
+        executors: [sing-box, mihomo]
+        evidence: [real_probe_fixture]
+      target_validation:
+        current: not_implemented
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12, mihomo-1.19]
+        evidence: [target_binary_fixture]
+
+  - protocol_id: tor
+    display_name: Tor
+    aliases: []
+    ecosystems: [sing-box]
+    capability:
+      recognize:
+        current: not_implemented
+        target_phase: M1
+        formats: [sing-box-json]
+        evidence: [detection_fixture]
+      lossless_passthrough:
+        current: not_implemented
+        target_phase: M1
+        formats: [sing-box-json]
+        evidence: [lossless_golden]
+      normalize:
+        current: not_implemented
+        target_phase: M4
+        formats: [sing-box-json]
+        evidence: [canonical_parse_fixture]
+      edit_convert:
+        current: not_implemented
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12]
+        evidence: [render_fixture]
+      real_health_check:
+        current: not_implemented
+        target_phase: continuous
+        executors: [sing-box]
+        evidence: [real_probe_fixture]
+      target_validation:
+        current: not_implemented
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12]
+        evidence: [target_binary_fixture]
+
+  - protocol_id: naive
+    display_name: NaiveProxy
+    aliases: [naiveproxy]
+    ecosystems: [momo, external]
+    capability:
+      recognize:
+        current: not_implemented
+        target_phase: continuous
+        formats: [sing-box-json]
+        evidence: [detection_fixture]
+      lossless_passthrough:
+        current: implemented_opaque_same_format
+        target_phase: M1
+        formats: [sing-box-json]
+        evidence: [lossless_golden]
+      normalize:
+        current: not_implemented
+        target_phase: continuous
+        formats: [sing-box-json]
+        evidence: [canonical_parse_fixture]
+      edit_convert:
+        current: not_implemented
+        target_phase: continuous
+        targets: []
+        evidence: [render_fixture]
+      real_health_check:
+        current: not_implemented
+        target_phase: continuous
+        executors: []
+        evidence: [real_probe_fixture]
+      target_validation:
+        current: implemented
+        target_phase: continuous
+        targets: [singbox-1.13]
+        evidence: [target_binary_fixture]
+
+  - protocol_id: snell
+    display_name: Snell
+    aliases: []
+    ecosystems: [momo, mihomo]
+    capability:
+      recognize:
+        current: not_implemented
+        target_phase: continuous
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [detection_fixture]
+      lossless_passthrough:
+        current: not_implemented
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [lossless_golden]
+      normalize:
+        current: not_implemented
+        target_phase: continuous
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [canonical_parse_fixture]
+      edit_convert:
+        current: not_implemented
+        target_phase: continuous
+        targets: [mihomo-1.19]
+        evidence: [render_fixture]
+      real_health_check:
+        current: not_implemented
+        target_phase: continuous
+        executors: [mihomo]
+        evidence: [real_probe_fixture]
+      target_validation:
+        current: not_implemented
+        target_phase: continuous
+        targets: [mihomo-1.19]
+        evidence: [target_binary_fixture]
+
+  - protocol_id: shadowsocksr
+    display_name: ShadowsocksR
+    aliases: [ssr]
+    ecosystems: [sing-box-removed, mihomo, uri, historical]
+    notes:
+      - sing-box v1.12.25 registers a stub that rejects SSR as removed since v1.6.0.
+    capability:
+      recognize:
+        current: not_implemented
+        target_phase: M5
+        formats: [mihomo-yaml-json, uri-list]
+        evidence: [detection_fixture]
+      lossless_passthrough:
+        current: not_implemented
+        target_phase: M1
+        formats: [sing-box-json, uri-list, mihomo-yaml-json]
+        evidence: [lossless_golden]
+        deliveries:
+          - {phase: M1, format: sing-box-json, mode: raw_only}
+          - {phase: M5, format: mihomo-yaml-json, mode: native}
+      normalize:
+        current: not_implemented
+        target_phase: M5
+        formats: [mihomo-yaml-json, uri-list]
+        evidence: [canonical_parse_fixture]
+      edit_convert:
+        current: not_implemented
+        target_phase: M5
+        targets: [mihomo-1.19]
+        evidence: [render_fixture]
+      real_health_check:
+        current: not_implemented
+        target_phase: M5
+        executors: [mihomo]
+        evidence: [real_probe_fixture]
+      target_validation:
+        current: not_implemented
+        target_phase: M5
+        targets: [mihomo-1.19]
+        evidence: [target_binary_fixture]
+
+  - protocol_id: mieru
+    display_name: mieru
+    aliases: []
+    ecosystems: [mihomo, external]
+    capability:
+      recognize:
+        current: not_implemented
+        target_phase: M5
+        formats: [mihomo-yaml-json]
+        evidence: [detection_fixture]
+      lossless_passthrough:
+        current: not_implemented
+        target_phase: M5
+        formats: [mihomo-yaml-json]
+        evidence: [lossless_golden]
+      normalize:
+        current: not_implemented
+        target_phase: M5
+        formats: [mihomo-yaml-json]
+        evidence: [canonical_parse_fixture]
+      edit_convert:
+        current: not_implemented
+        target_phase: M5
+        targets: [mihomo-1.19]
+        evidence: [render_fixture]
+      real_health_check:
+        current: not_implemented
+        target_phase: M5
+        executors: [mihomo]
+        evidence: [real_probe_fixture]
+      target_validation:
+        current: not_implemented
+        target_phase: M5
+        targets: [mihomo-1.19]
+        evidence: [target_binary_fixture]
+
+  - protocol_id: gost-relay
+    display_name: GOST Relay
+    aliases: []
+    ecosystems: [mihomo]
+    capability:
+      recognize:
+        current: not_implemented
+        target_phase: M5
+        formats: [mihomo-yaml-json]
+        evidence: [detection_fixture]
+      lossless_passthrough:
+        current: not_implemented
+        target_phase: M5
+        formats: [mihomo-yaml-json]
+        evidence: [lossless_golden]
+      normalize:
+        current: not_implemented
+        target_phase: M5
+        formats: [mihomo-yaml-json]
+        evidence: [canonical_parse_fixture]
+      edit_convert:
+        current: not_implemented
+        target_phase: M5
+        targets: [mihomo-1.19]
+        evidence: [render_fixture]
+      real_health_check:
+        current: not_implemented
+        target_phase: M5
+        executors: [mihomo]
+        evidence: [real_probe_fixture]
+      target_validation:
+        current: not_implemented
+        target_phase: M5
+        targets: [mihomo-1.19]
+        evidence: [target_binary_fixture]
+
+  - protocol_id: sudoku
+    display_name: Sudoku
+    aliases: []
+    ecosystems: [mihomo]
+    capability:
+      recognize:
+        current: not_implemented
+        target_phase: M5
+        formats: [mihomo-yaml-json]
+        evidence: [detection_fixture]
+      lossless_passthrough:
+        current: not_implemented
+        target_phase: M5
+        formats: [mihomo-yaml-json]
+        evidence: [lossless_golden]
+      normalize:
+        current: not_implemented
+        target_phase: M5
+        formats: [mihomo-yaml-json]
+        evidence: [canonical_parse_fixture]
+      edit_convert:
+        current: not_implemented
+        target_phase: M5
+        targets: [mihomo-1.19]
+        evidence: [render_fixture]
+      real_health_check:
+        current: not_implemented
+        target_phase: M5
+        executors: [mihomo]
+        evidence: [real_probe_fixture]
+      target_validation:
+        current: not_implemented
+        target_phase: M5
+        targets: [mihomo-1.19]
+        evidence: [target_binary_fixture]
+
+  - protocol_id: masque
+    display_name: MASQUE
+    aliases: []
+    ecosystems: [mihomo]
+    capability:
+      recognize:
+        current: not_implemented
+        target_phase: M5
+        formats: [mihomo-yaml-json]
+        evidence: [detection_fixture]
+      lossless_passthrough:
+        current: not_implemented
+        target_phase: M5
+        formats: [mihomo-yaml-json]
+        evidence: [lossless_golden]
+      normalize:
+        current: not_implemented
+        target_phase: M5
+        formats: [mihomo-yaml-json]
+        evidence: [canonical_parse_fixture]
+      edit_convert:
+        current: not_implemented
+        target_phase: M5
+        targets: [mihomo-1.19]
+        evidence: [render_fixture]
+      real_health_check:
+        current: not_implemented
+        target_phase: M5
+        executors: [mihomo]
+        evidence: [real_probe_fixture]
+      target_validation:
+        current: not_implemented
+        target_phase: M5
+        targets: [mihomo-1.19]
+        evidence: [target_binary_fixture]
+
+  - protocol_id: trusttunnel
+    display_name: TrustTunnel
+    aliases: []
+    ecosystems: [mihomo]
+    capability:
+      recognize:
+        current: not_implemented
+        target_phase: M5
+        formats: [mihomo-yaml-json]
+        evidence: [detection_fixture]
+      lossless_passthrough:
+        current: not_implemented
+        target_phase: M5
+        formats: [mihomo-yaml-json]
+        evidence: [lossless_golden]
+      normalize:
+        current: not_implemented
+        target_phase: M5
+        formats: [mihomo-yaml-json]
+        evidence: [canonical_parse_fixture]
+      edit_convert:
+        current: not_implemented
+        target_phase: M5
+        targets: [mihomo-1.19]
+        evidence: [render_fixture]
+      real_health_check:
+        current: not_implemented
+        target_phase: M5
+        executors: [mihomo]
+        evidence: [real_probe_fixture]
+      target_validation:
+        current: not_implemented
+        target_phase: M5
+        targets: [mihomo-1.19]
+        evidence: [target_binary_fixture]
+
+  - protocol_id: openvpn
+    display_name: OpenVPN
+    aliases: []
+    ecosystems: [mihomo]
+    capability:
+      recognize:
+        current: not_implemented
+        target_phase: M5
+        formats: [mihomo-yaml-json]
+        evidence: [detection_fixture]
+      lossless_passthrough:
+        current: not_implemented
+        target_phase: M5
+        formats: [mihomo-yaml-json]
+        evidence: [lossless_golden]
+      normalize:
+        current: not_implemented
+        target_phase: M5
+        formats: [mihomo-yaml-json]
+        evidence: [canonical_parse_fixture]
+      edit_convert:
+        current: not_implemented
+        target_phase: M5
+        targets: [mihomo-1.19]
+        evidence: [render_fixture]
+      real_health_check:
+        current: not_implemented
+        target_phase: M5
+        executors: [mihomo]
+        evidence: [real_probe_fixture]
+      target_validation:
+        current: not_implemented
+        target_phase: M5
+        targets: [mihomo-1.19]
+        evidence: [target_binary_fixture]
+
+  - protocol_id: tailscale
+    display_name: Tailscale
+    aliases: []
+    ecosystems: [mihomo, sing-box-endpoint]
+    notes:
+      - Mihomo v1.19.28 parses tailscale as a proxy type.
+      - sing-box v1.12.25 models tailscale as an Endpoint, not an Outbound node.
+    capability:
+      recognize:
+        current: not_implemented
+        target_phase: M5
+        formats: [mihomo-yaml-json]
+        evidence: [detection_fixture]
+      lossless_passthrough:
+        current: not_implemented
+        target_phase: M5
+        formats: [mihomo-yaml-json]
+        evidence: [lossless_golden]
+      normalize:
+        current: not_implemented
+        target_phase: M5
+        formats: [mihomo-yaml-json]
+        evidence: [canonical_parse_fixture]
+      edit_convert:
+        current: not_implemented
+        target_phase: M5
+        targets: [mihomo-1.19]
+        evidence: [render_fixture]
+      real_health_check:
+        current: not_implemented
+        target_phase: M5
+        executors: [mihomo]
+        evidence: [real_probe_fixture]
+      target_validation:
+        current: not_implemented
+        target_phase: M5
+        targets: [mihomo-1.19]
+        evidence: [target_binary_fixture]
+
+  - protocol_id: juicity
+    display_name: Juicity
+    aliases: []
+    ecosystems: [external, client-extension]
+    capability:
+      recognize:
+        current: not_implemented
+        target_phase: continuous
+        formats: []
+        evidence: [detection_fixture]
+      lossless_passthrough:
+        current: not_implemented
+        target_phase: continuous
+        formats: []
+        evidence: [lossless_golden]
+      normalize:
+        current: not_implemented
+        target_phase: continuous
+        formats: []
+        evidence: [canonical_parse_fixture]
+      edit_convert:
+        current: not_implemented
+        target_phase: continuous
+        targets: []
+        evidence: [render_fixture]
+      real_health_check:
+        current: not_implemented
+        target_phase: continuous
+        executors: []
+        evidence: [real_probe_fixture]
+      target_validation:
+        current: not_implemented
+        target_phase: continuous
+        targets: []
+        evidence: [target_binary_fixture]
+
+  - protocol_id: opaque.unknown
+    display_name: Unknown structured protocol
+    aliases: []
+    ecosystems: [future, client-extension, private]
+    capability:
+      recognize:
+        current: implemented
+        target_phase: M1
+        formats: [sing-box-json, uri-list]
+        evidence: [detection_fixture]
+        limitations:
+          - Recognition is limited to a namespaced raw type, not protocol semantics.
+      lossless_passthrough:
+        current: implemented
+        target_phase: M1
+        formats: [sing-box-json, uri-list]
+        evidence: [lossless_golden]
+      normalize:
+        current: not_applicable
+        target_phase: null
+        formats: []
+        evidence: []
+        limitations:
+          - Requires a future registered adapter and fixture.
+      edit_convert:
+        current: blocked
+        target_phase: continuous
+        targets: []
+        evidence: []
+        limitations:
+          - Semantic conversion is forbidden until the protocol is registered.
+      real_health_check:
+        current: blocked
+        target_phase: continuous
+        executors: []
+        evidence: []
+        limitations:
+          - Endpoint connectivity may be shown separately but is not real protocol health.
+      target_validation:
+        current: not_implemented
+        target_phase: M4
+        targets: [momo-singbox-1.12, singbox-1.12]
+        evidence: [target_binary_fixture]
+        limitations:
+          - Pass-through remains publishable only if the selected target accepts the object.
+
+non_proxy_outbounds:
+  - id: direct
+    handling: preserve_in_template_or_exclude_from_node_collection
+  - id: block
+    handling: preserve_in_template_or_exclude_from_node_collection
+  - id: dns
+    handling: preserve_in_template_or_exclude_from_node_collection
+  - id: selector
+    handling: preserve_as_logical_outbound_and_validate_references
+  - id: urltest
+    handling: preserve_as_logical_outbound_and_validate_references
+  - id: reject
+    handling: preserve_in_mihomo_config_or_exclude_from_node_collection
+  - id: rematch
+    handling: preserve_in_mihomo_config_or_exclude_from_node_collection
+
+non_node_singbox_objects:
+  - id: tailscale
+    object_kind: endpoint
+    handling: preserve_in_complete_config_and_validate_references
+  - id: derp
+    object_kind: service
+    handling: preserve_in_complete_config
+  - id: ssm-api
+    object_kind: service
+    handling: preserve_in_complete_config
+
+cross_cutting_extensions:
+  - id: tls
+    includes: [sni, alpn, certificates, insecure]
+    rule: Connection identity, normalization and conversion must include every applicable field.
+  - id: reality
+    includes: [public_key, short_id, fingerprint]
+    rule: Never silently drop during conversion.
+  - id: ech
+    includes: [enabled, config, pq_signature_schemes, dynamic_record_sizing_disabled]
+    rule: Unknown nested ECH fields remain in Raw Node even when canonical parsing is partial.
+  - id: utls
+    includes: [enabled, fingerprint]
+    rule: Target-specific semantics require a target fixture.
+  - id: transports
+    includes: [tcp, udp, ws, http, httpupgrade, grpc, quic]
+    rule: Transport fields participate in Fingerprint and Health Key projections.
+
+release_gate:
+  implemented_dimension_requires:
+    recognize: [detection_fixture]
+    lossless_passthrough: [lossless_golden]
+    normalize: [canonical_parse_fixture]
+    edit_convert: [canonical_parse_fixture, render_fixture]
+    real_health_check: [real_probe_fixture]
+    target_validation: [target_binary_fixture]
+  regression_rule: >-
+    A released implemented dimension cannot be downgraded silently. A regression
+    blocks release or is published as an explicit compatibility advisory while
+    same-format Raw Node preservation remains enabled.

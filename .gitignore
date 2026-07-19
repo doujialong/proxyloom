@@ -1,0 +1,8 @@
+/bin/
+/coverage.out
+.DS_Store
+/web/node_modules/
+/web/*.tsbuildinfo
+/web/src/*.js
+/web/vite.config.js
+/web/vite.config.d.ts

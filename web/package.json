@@ -1,0 +1,21 @@
+{
+  "name": "proxyloom-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "vue-tsc -b && vite build",
+    "dev": "vite --host 127.0.0.1"
+  },
+  "dependencies": {
+	"@lucide/vue": "1.25.0",
+    "vue": "3.5.17"
+  },
+  "devDependencies": {
+	"@vitejs/plugin-vue": "6.0.8",
+	"playwright-core": "1.61.1",
+    "typescript": "5.8.3",
+	"vite": "7.3.6",
+    "vue-tsc": "3.0.2"
+  }
+}

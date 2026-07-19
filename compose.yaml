@@ -1,0 +1,71 @@
+services:
+  init-data:
+    profiles: [setup]
+    build: .
+    image: proxyloom:dev
+    user: "0:0"
+    command: ["init-data", "--path", "/var/lib/proxyloom"]
+    volumes:
+      - proxyloom-data:/var/lib/proxyloom
+
+  init-key:
+    profiles: [setup]
+    build: .
+    image: proxyloom:dev
+    user: "0:0"
+    command: ["init-key", "--path", "/run/secrets/proxyloom/master.key"]
+    volumes:
+      - proxyloom-secrets:/run/secrets/proxyloom
+
+  init-admin-token:
+    profiles: [setup]
+    build: .
+    image: proxyloom:dev
+    user: "0:0"
+    command: ["init-admin-token", "--path", "/run/secrets/proxyloom/admin.token"]
+    volumes:
+      - proxyloom-secrets:/run/secrets/proxyloom
+
+  proxyloom:
+    build: .
+    image: proxyloom:dev
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "${PROXYLOOM_BIND:-127.0.0.1}:${PROXYLOOM_PORT:-8080}:8080"
+    command:
+      - serve
+      - --listen
+      - 0.0.0.0:8080
+      - --data-dir
+      - /var/lib/proxyloom
+      - --master-key
+      - /run/secrets/proxyloom/master.key
+      - --admin-token
+      - /run/secrets/proxyloom/admin.token
+      - --public-origin
+      - ${PROXYLOOM_PUBLIC_ORIGIN:-}
+      - --secure-cookie=${PROXYLOOM_SECURE_COOKIE:-false}
+      - --sing-box-1.12-path
+      - /opt/sing-box-1.12.25/sing-box
+      - --sing-box-1.13-path
+      - /opt/sing-box-1.13.14/sing-box
+    volumes:
+      - proxyloom-data:/var/lib/proxyloom
+      - proxyloom-secrets:/run/secrets/proxyloom:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=0700,uid=65532,gid=65532
+
+networks:
+  default:
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: ${PROXYLOOM_IPV6_SUBNET:-fd12:7072:6f78:796c::/64}
+
+volumes:
+  proxyloom-data:
+  proxyloom-secrets:

@@ -1,0 +1,175 @@
+[
+  {
+    "type": "socks",
+    "tag": "socks-fixture",
+    "server": "198.51.100.1",
+    "server_port": 1080,
+    "version": "5",
+    "username": "fixture-user",
+    "password": "fixture-password",
+    "network": ["tcp", "udp"]
+  },
+  {
+    "type": "http",
+    "tag": "http-fixture",
+    "server": "198.51.100.2",
+    "server_port": 443,
+    "username": "fixture-user",
+    "password": "fixture-password",
+    "tls": {
+      "enabled": true,
+      "disable_sni": false,
+      "server_name": "http.example.test",
+      "insecure": false,
+      "alpn": ["h2", "http/1.1"],
+      "min_version": "1.2",
+      "max_version": "1.3",
+      "cipher_suites": "TLS_AES_128_GCM_SHA256",
+      "certificate_path": "/fixture/ca.pem",
+      "ech": {
+        "enabled": true,
+        "config": ["AA=="],
+        "config_path": "/fixture/ech.pem",
+        "pq_signature_schemes_enabled": false,
+        "dynamic_record_sizing_disabled": true
+      },
+      "utls": {
+        "enabled": true,
+        "fingerprint": "chrome"
+      },
+      "reality": {
+        "enabled": true,
+        "public_key": "fixture-public-key",
+        "short_id": "0123456789abcdef"
+      }
+    },
+    "path": "/proxy"
+  },
+  {
+    "type": "shadowsocks",
+    "tag": "ss-fixture",
+    "server": "198.51.100.3",
+    "server_port": 8388,
+    "method": "2022-blake3-aes-128-gcm",
+    "password": "fixture-password",
+    "plugin": "obfs-local",
+    "plugin_opts": "obfs=http",
+    "network": "tcp",
+    "multiplex": {
+      "enabled": true,
+      "protocol": "h2mux",
+      "max_connections": 4,
+      "min_streams": 2,
+      "max_streams": 8,
+      "padding": true
+    }
+  },
+  {
+    "type": "vmess",
+    "tag": "vmess-fixture",
+    "server": "198.51.100.4",
+    "server_port": 443,
+    "uuid": "00000000-0000-0000-0000-000000000004",
+    "security": "auto",
+    "alter_id": 0,
+    "global_padding": true,
+    "authenticated_length": true,
+    "packet_encoding": "xudp",
+    "tls": {
+      "enabled": true,
+      "server_name": "vmess.example.test"
+    },
+    "transport": {
+      "type": "ws",
+      "host": ["vmess.example.test"],
+      "path": "/ws"
+    }
+  },
+  {
+    "type": "vless",
+    "tag": "vless-fixture",
+    "server": "198.51.100.5",
+    "server_port": 443,
+    "uuid": "00000000-0000-0000-0000-000000000005",
+    "flow": "xtls-rprx-vision",
+    "network": "tcp",
+    "packet_encoding": "xudp",
+    "tls": {
+      "enabled": true,
+      "server_name": "vless.example.test"
+    },
+    "transport": {
+      "type": "grpc",
+      "service_name": "fixture-service"
+    }
+  },
+  {
+    "type": "trojan",
+    "tag": "trojan-fixture",
+    "server": "198.51.100.6",
+    "server_port": 443,
+    "password": "fixture-password",
+    "network": ["tcp", "udp"],
+    "tls": {
+      "enabled": true,
+      "server_name": "trojan.example.test"
+    },
+    "transport": {
+      "type": "httpupgrade",
+      "host": "trojan.example.test",
+      "path": "/upgrade"
+    }
+  },
+  {
+    "type": "hysteria2",
+    "tag": "hy2-fixture",
+    "server": "198.51.100.7",
+    "server_port": 443,
+    "server_ports": ["443", "8443"],
+    "hop_interval": "30s",
+    "up_mbps": 100,
+    "down_mbps": 200,
+    "obfs": {
+      "type": "salamander",
+      "password": "fixture-obfs-password"
+    },
+    "password": "fixture-password",
+    "network": "udp",
+    "tls": {
+      "enabled": true,
+      "server_name": "hy2.example.test"
+    }
+  },
+  {
+    "type": "tuic",
+    "tag": "tuic-fixture",
+    "server": "198.51.100.8",
+    "server_port": 443,
+    "uuid": "00000000-0000-0000-0000-000000000008",
+    "password": "fixture-password",
+    "congestion_control": "bbr",
+    "udp_relay_mode": "native",
+    "udp_over_stream": true,
+    "zero_rtt_handshake": true,
+    "heartbeat": "10s",
+    "network": "udp",
+    "tls": {
+      "enabled": true,
+      "server_name": "tuic.example.test"
+    }
+  },
+  {
+    "type": "anytls",
+    "tag": "anytls-fixture",
+    "server": "198.51.100.9",
+    "server_port": 443,
+    "password": "fixture-password",
+    "idle_session_check_interval": "30s",
+    "idle_session_timeout": "60s",
+    "min_idle_session": 2,
+    "tls": {
+      "enabled": true,
+      "server_name": "anytls.example.test"
+    }
+  }
+]

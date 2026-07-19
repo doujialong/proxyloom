@@ -1,0 +1,589 @@
+openapi: 3.1.0
+info:
+  title: ProxyLoom Runtime API
+  version: 0.4.0-dev
+  summary: API surface implemented by the current ProxyLoom container.
+  description: |
+    This document describes running endpoints only. The broader target contract is
+    retained in openapi.yaml. Browser mutations require the Session cookie,
+    same-origin Origin/Referer, and X-CSRF-Token. A local administrator Bearer token
+    may be used by CLI clients without CSRF.
+  license:
+    name: AGPL-3.0-or-later
+    identifier: AGPL-3.0-or-later
+servers: [{url: /}]
+security:
+  - cookieAuth: []
+  - bearerAuth: []
+paths:
+  /healthz:
+    get:
+      operationId: getHealth
+      summary: Return process liveness.
+      security: []
+      responses:
+        '200': {$ref: '#/components/responses/JSON'}
+  /readyz:
+    get:
+      operationId: getReadiness
+      summary: Return service readiness.
+      security: []
+      responses:
+        '200': {$ref: '#/components/responses/JSON'}
+  /api/v1/setup/status:
+    get:
+      operationId: getSetupStatus
+      summary: Return non-secret setup status.
+      security: []
+      responses:
+        '200': {$ref: '#/components/responses/JSON'}
+  /api/v1/setup/admin:
+    post:
+      operationId: setupAdministrator
+      summary: Create the first administrator.
+      security: []
+      parameters:
+        - name: X-ProxyLoom-Setup-Token
+          in: header
+          required: true
+          schema: {type: string, writeOnly: true}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AdministratorSetup'}
+      responses:
+        '201': {$ref: '#/components/responses/Session'}
+        '401': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /api/v1/session:
+    get:
+      operationId: getSession
+      summary: Refresh the current browser Session.
+      security: [{cookieAuth: []}]
+      responses:
+        '200': {$ref: '#/components/responses/Session'}
+        '401': {$ref: '#/components/responses/Error'}
+    post:
+      operationId: login
+      summary: Create a browser Session.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Login'}
+      responses:
+        '201': {$ref: '#/components/responses/Session'}
+        '401': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: logout
+      summary: Revoke the current browser Session.
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses:
+        '204': {description: Session revoked.}
+  /api/v1/session/reauthenticate:
+    post:
+      operationId: reauthenticate
+      summary: Refresh the recent-authentication window.
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [password]
+              properties: {password: {type: string, writeOnly: true}}
+      responses:
+        '200': {$ref: '#/components/responses/Session'}
+        '401': {$ref: '#/components/responses/Error'}
+  /api/v1/session/password:
+    post:
+      operationId: changeAdministratorPassword
+      summary: Change the current administrator password and revoke all Sessions.
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [current_password, new_password]
+              properties:
+                current_password: {type: string, minLength: 1, maxLength: 1024, writeOnly: true}
+                new_password: {type: string, minLength: 1, maxLength: 1024, writeOnly: true}
+      responses:
+        '204': {description: Password changed and all Sessions revoked.}
+        '401': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /api/v1/sources:
+    get:
+      operationId: listSources
+      summary: List subscription Sources.
+      parameters:
+        - {$ref: '#/components/parameters/Limit'}
+        - {name: cursor, in: query, schema: {type: string}}
+        - {name: query, in: query, schema: {type: string}}
+        - {name: status, in: query, schema: {type: string}}
+        - {name: include_archived, in: query, schema: {type: boolean}}
+      responses:
+        '200': {$ref: '#/components/responses/Page'}
+    post:
+      operationId: createSource
+      summary: Create and enqueue a subscription Source.
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SourceWrite'}
+      responses:
+        '202': {$ref: '#/components/responses/JSON'}
+        '400': {$ref: '#/components/responses/Error'}
+  /api/v1/sources/{sourceId}:
+    parameters: [{$ref: '#/components/parameters/SourceID'}]
+    get:
+      operationId: getSource
+      summary: Get a subscription Source.
+      responses:
+        '200': {$ref: '#/components/responses/JSON'}
+        '404': {$ref: '#/components/responses/Error'}
+    put:
+      operationId: replaceSource
+      summary: Replace Source configuration and enqueue refresh.
+      parameters: [{$ref: '#/components/parameters/IfMatch'}, {$ref: '#/components/parameters/CSRF'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/SourceWrite'}}}
+      responses:
+        '202': {$ref: '#/components/responses/JSON'}
+        '412': {$ref: '#/components/responses/Error'}
+    patch:
+      operationId: patchSource
+      summary: Merge-patch Source configuration and enqueue refresh.
+      parameters: [{$ref: '#/components/parameters/IfMatch'}, {$ref: '#/components/parameters/CSRF'}]
+      requestBody:
+        required: true
+        content: {application/merge-patch+json: {schema: {type: object}}}
+      responses:
+        '202': {$ref: '#/components/responses/JSON'}
+        '412': {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: archiveSource
+      summary: Archive a Source.
+      parameters: [{$ref: '#/components/parameters/IfMatch'}, {$ref: '#/components/parameters/CSRF'}]
+      responses:
+        '204': {description: Source archived.}
+        '412': {$ref: '#/components/responses/Error'}
+  /api/v1/sources/{sourceId}/refresh:
+    post:
+      operationId: refreshSource
+      summary: Enqueue a Source refresh.
+      parameters: [{$ref: '#/components/parameters/SourceID'}, {$ref: '#/components/parameters/CSRF'}]
+      responses:
+        '202': {$ref: '#/components/responses/JSON'}
+  /api/v1/sources/{sourceId}/tokens:
+    post:
+      operationId: createSourceToken
+      summary: Create a Source publication token.
+      parameters: [{$ref: '#/components/parameters/SourceID'}, {$ref: '#/components/parameters/CSRF'}]
+      responses:
+        '201': {$ref: '#/components/responses/JSON'}
+  /api/v1/sources/{sourceId}/{historyKind}:
+    get:
+      operationId: listSourceHistory
+      summary: List Source revisions, attempts, or snapshots.
+      parameters:
+        - {$ref: '#/components/parameters/SourceID'}
+        - name: historyKind
+          in: path
+          required: true
+          schema: {type: string, enum: [revisions, refresh-attempts, snapshots]}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200': {$ref: '#/components/responses/Page'}
+  /api/v1/jobs/{jobId}:
+    get:
+      operationId: getJob
+      summary: Get a Source or Output Job.
+      parameters: [{$ref: '#/components/parameters/JobID'}]
+      responses:
+        '200': {$ref: '#/components/responses/JSON'}
+        '404': {$ref: '#/components/responses/Error'}
+  /api/v1/nodes:
+    get:
+      operationId: listNodes
+      summary: List current Node Occurrences.
+      parameters:
+        - {$ref: '#/components/parameters/Limit'}
+        - {name: cursor, in: query, schema: {type: string}}
+        - {name: source_id, in: query, schema: {$ref: '#/components/schemas/ID'}}
+        - {name: protocol, in: query, schema: {type: string}}
+        - {name: health, in: query, schema: {type: string}}
+      responses:
+        '200': {$ref: '#/components/responses/Page'}
+  /api/v1/nodes/{nodeId}:
+    get:
+      operationId: getNode
+      summary: Get a Node Occurrence.
+      parameters: [{$ref: '#/components/parameters/NodeID'}]
+      responses:
+        '200': {$ref: '#/components/responses/JSON'}
+        '404': {$ref: '#/components/responses/Error'}
+  /api/v1/nodes/{nodeId}/health-records:
+    get:
+      operationId: listNodeHealthRecords
+      summary: List immutable health records for a Node.
+      parameters: [{$ref: '#/components/parameters/NodeID'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200': {$ref: '#/components/responses/Page'}
+  /api/v1/nodes/{nodeId}/checks:
+    post:
+      operationId: checkNode
+      summary: Enqueue one Node health check.
+      parameters: [{$ref: '#/components/parameters/NodeID'}, {$ref: '#/components/parameters/CSRF'}]
+      responses:
+        '202': {$ref: '#/components/responses/JSON'}
+  /api/v1/node-checks:
+    post:
+      operationId: checkNodes
+      summary: Enqueue bounded bulk Node health checks.
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [node_occurrence_ids]
+              properties:
+                node_occurrence_ids: {type: array, minItems: 1, maxItems: 200, items: {$ref: '#/components/schemas/ID'}}
+      responses:
+        '202': {$ref: '#/components/responses/JSON'}
+  /api/v1/health/capacity:
+    get:
+      operationId: getHealthCapacity
+      summary: Return health queue and guard capacity.
+      responses:
+        '200': {$ref: '#/components/responses/JSON'}
+  /api/v1/collections:
+    get:
+      operationId: listCollections
+      summary: List managed Collections.
+      responses:
+        '200': {$ref: '#/components/responses/Page'}
+    post:
+      operationId: createCollection
+      summary: Create a managed Collection.
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CollectionWrite'}}}
+      responses:
+        '201': {$ref: '#/components/responses/JSON'}
+  /api/v1/collections/{collectionId}:
+    parameters: [{$ref: '#/components/parameters/CollectionID'}]
+    get:
+      operationId: getCollection
+      summary: Get a managed Collection.
+      responses:
+        '200': {$ref: '#/components/responses/JSON'}
+    put:
+      operationId: updateCollection
+      summary: Replace a Collection and enqueue affected Outputs.
+      parameters: [{$ref: '#/components/parameters/IfMatch'}, {$ref: '#/components/parameters/CSRF'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CollectionWrite'}}}
+      responses:
+        '200': {$ref: '#/components/responses/JSON'}
+        '412': {$ref: '#/components/responses/Error'}
+  /api/v1/pipelines:
+    get:
+      operationId: listPipelines
+      summary: List managed Pipelines.
+      responses:
+        '200': {$ref: '#/components/responses/Page'}
+    post:
+      operationId: createPipeline
+      summary: Create a validated Pipeline.
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/PipelineWrite'}}}
+      responses:
+        '201': {$ref: '#/components/responses/JSON'}
+        '422': {$ref: '#/components/responses/Error'}
+  /api/v1/pipelines/{pipelineId}:
+    parameters:
+      - name: pipelineId
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/ID'}
+    get:
+      operationId: getPipeline
+      summary: Get a managed Pipeline.
+      responses:
+        '200': {$ref: '#/components/responses/JSON'}
+    put:
+      operationId: updatePipeline
+      summary: Replace a Pipeline and enqueue affected Outputs.
+      parameters: [{$ref: '#/components/parameters/IfMatch'}, {$ref: '#/components/parameters/CSRF'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/PipelineWrite'}}}
+      responses:
+        '200': {$ref: '#/components/responses/JSON'}
+        '412': {$ref: '#/components/responses/Error'}
+  /api/v1/templates:
+    get:
+      operationId: listTemplates
+      summary: List managed sing-box Templates.
+      responses:
+        '200': {$ref: '#/components/responses/Page'}
+    post:
+      operationId: createTemplate
+      summary: Create a validated sing-box Template.
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/TemplateWrite'}}}
+      responses:
+        '201': {$ref: '#/components/responses/JSON'}
+        '422': {$ref: '#/components/responses/Error'}
+  /api/v1/outputs:
+    get:
+      operationId: listOutputs
+      summary: List managed Outputs.
+      responses:
+        '200': {$ref: '#/components/responses/Page'}
+    post:
+      operationId: createOutput
+      summary: Create an Output and publication token.
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/OutputWrite'}}}
+      responses:
+        '201': {$ref: '#/components/responses/JSON'}
+        '422': {$ref: '#/components/responses/Error'}
+  /api/v1/outputs/{outputId}:
+    get:
+      operationId: getOutput
+      summary: Get a managed Output.
+      parameters: [{$ref: '#/components/parameters/OutputID'}]
+      responses:
+        '200': {$ref: '#/components/responses/JSON'}
+        '404': {$ref: '#/components/responses/Error'}
+    patch:
+      operationId: updateOutputPolicy
+      summary: Update managed Output health and content-gate policy, then enqueue a build.
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                health_filter_enabled: {type: boolean}
+                minimum_nodes: {type: integer, minimum: 1, maximum: 100000}
+                maximum_drop_ratio: {type: number, minimum: 0, maximum: 1}
+      responses:
+        '202': {$ref: '#/components/responses/JSON'}
+        '400': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /api/v1/outputs/{outputId}/builds:
+    post:
+      operationId: buildOutput
+      summary: Enqueue a deduplicated Output Build Job.
+      parameters: [{$ref: '#/components/parameters/OutputID'}, {$ref: '#/components/parameters/CSRF'}]
+      responses:
+        '202': {$ref: '#/components/responses/JSON'}
+  /api/v1/outputs/{outputId}/build:
+    post:
+      operationId: buildOutputLegacy
+      summary: Enqueue an Output Build Job using the legacy path.
+      deprecated: true
+      parameters: [{$ref: '#/components/parameters/OutputID'}, {$ref: '#/components/parameters/CSRF'}]
+      responses:
+        '202': {$ref: '#/components/responses/JSON'}
+  /api/v1/outputs/{outputId}/tokens:
+    post:
+      operationId: rotateOutputToken
+      summary: Create an Output token and optionally revoke existing tokens.
+      parameters: [{$ref: '#/components/parameters/OutputID'}, {$ref: '#/components/parameters/CSRF'}]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties: {revoke_existing: {type: boolean, default: true}}
+      responses:
+        '201': {$ref: '#/components/responses/JSON'}
+  /subscriptions/{token}:
+    parameters:
+      - name: token
+        in: path
+        required: true
+        schema: {type: string, minLength: 43, maxLength: 128, writeOnly: true}
+    get:
+      operationId: getPublishedSubscription
+      summary: Return the last valid published Artifact.
+      security: []
+      responses:
+        '200': {description: Last valid immutable artifact.}
+        '304': {description: Artifact unchanged.}
+        '404': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+    head:
+      operationId: headPublishedSubscription
+      summary: Return published Artifact headers.
+      security: []
+      responses:
+        '200': {description: Artifact metadata headers only.}
+        '304': {description: Artifact unchanged.}
+        '404': {$ref: '#/components/responses/Error'}
+components:
+  securitySchemes:
+    cookieAuth: {type: apiKey, in: cookie, name: proxyloom_session}
+    bearerAuth: {type: http, scheme: bearer}
+  parameters:
+    CSRF: {name: X-CSRF-Token, in: header, schema: {type: string, writeOnly: true}}
+    IfMatch: {name: If-Match, in: header, required: true, schema: {type: string}}
+    Limit: {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+    SourceID: {name: sourceId, in: path, required: true, schema: {$ref: '#/components/schemas/ID'}}
+    NodeID: {name: nodeId, in: path, required: true, schema: {$ref: '#/components/schemas/ID'}}
+    JobID: {name: jobId, in: path, required: true, schema: {$ref: '#/components/schemas/ID'}}
+    CollectionID: {name: collectionId, in: path, required: true, schema: {$ref: '#/components/schemas/ID'}}
+    OutputID: {name: outputId, in: path, required: true, schema: {$ref: '#/components/schemas/ID'}}
+  schemas:
+    ID: {type: string, format: uuid, pattern: '^[0-9a-f-]{36}$'}
+    Login:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username: {type: string, minLength: 1, maxLength: 64}
+        password: {type: string, writeOnly: true, minLength: 1, maxLength: 1024}
+    AdministratorSetup:
+      allOf:
+        - {$ref: '#/components/schemas/Login'}
+        - type: object
+          properties:
+            username: {type: string, minLength: 3, maxLength: 64}
+            timezone: {type: string, minLength: 1, maxLength: 64, default: Asia/Shanghai}
+    SourceWrite:
+      type: object
+      additionalProperties: false
+      required: [display_name, type]
+      properties:
+        display_name: {type: string, minLength: 1, maxLength: 200}
+        type: {type: string, enum: [inline, remote]}
+        content: {type: string, writeOnly: true, maxLength: 52428800}
+        url: {type: string, writeOnly: true, format: uri}
+        headers: {type: object, writeOnly: true, additionalProperties: {type: string}}
+        proxy_url: {type: [string, 'null'], writeOnly: true, format: uri, description: HTTP, HTTPS, SOCKS5 or SOCKS5H proxy. Null clears it during merge-patch.}
+        timeout_seconds: {type: integer, minimum: 1, maximum: 120, default: 30}
+        input_format: {type: string, enum: [auto, sing-box, mihomo, client-text, uri-list]}
+        output_format: {type: string}
+        minimum_nodes: {type: integer, minimum: 1, maximum: 100000}
+        maximum_drop_ratio: {type: number, minimum: 0, maximum: 1}
+        refresh_interval_seconds: {type: integer, minimum: 0}
+        private_network_authorized: {type: boolean}
+        max_response_bytes: {type: integer, minimum: 0, maximum: 52428800}
+        health_filter_enabled: {type: boolean}
+    CollectionWrite:
+      type: object
+      additionalProperties: false
+      required: [display_name, members]
+      properties:
+        display_name: {type: string, minLength: 1, maxLength: 200}
+        members:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items:
+            type: object
+            additionalProperties: false
+            required: [kind, id]
+            properties:
+              kind: {type: string, enum: [source, node_occurrence]}
+              id: {$ref: '#/components/schemas/ID'}
+              enabled: {type: boolean, default: true}
+    PipelineWrite:
+      type: object
+      additionalProperties: false
+      required: [display_name, operations]
+      properties:
+        display_name: {type: string, minLength: 1, maxLength: 200}
+        operations:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            additionalProperties: false
+            required: [type, schema_version, config]
+            properties:
+              type: {type: string, enum: [filter, rename, sort]}
+              schema_version: {type: integer, const: 1}
+              config: {type: object, additionalProperties: true}
+    TemplateWrite:
+      type: object
+      additionalProperties: false
+      required: [display_name, content]
+      properties:
+        display_name: {type: string, minLength: 1, maxLength: 200}
+        source_type: {type: string, enum: [inline]}
+        target_format: {type: string, enum: [sing-box]}
+        content: {type: string, writeOnly: true, maxLength: 52428800}
+    OutputWrite:
+      type: object
+      additionalProperties: false
+      required: [display_name, collection_id]
+      properties:
+        display_name: {type: string, minLength: 1, maxLength: 200}
+        collection_id: {$ref: '#/components/schemas/ID'}
+        pipeline_id: {$ref: '#/components/schemas/ID'}
+        template_id: {$ref: '#/components/schemas/ID'}
+        target_profile: {type: string, enum: [sing-box-1.12.25, momo-1.2.1-sing-box-1.12.25, sing-box-1.13.14], default: sing-box-1.12.25}
+        output_shape: {type: string, enum: [outbounds_object, full_config], default: outbounds_object}
+        health_filter_enabled: {type: boolean}
+        minimum_nodes: {type: integer, minimum: 1, maximum: 100000, default: 1}
+        maximum_drop_ratio: {type: number, minimum: 0, maximum: 1, default: 0.5}
+  responses:
+    JSON:
+      description: JSON resource.
+      content: {application/json: {schema: {type: object, additionalProperties: true}}}
+    Page:
+      description: Non-cursor or cursor-backed page.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [items, page]
+            properties:
+              items: {type: array, items: {type: object, additionalProperties: true}}
+              page: {type: object, additionalProperties: true}
+    Session:
+      description: Administrator Session and current CSRF token.
+      content: {application/json: {schema: {type: object, additionalProperties: true}}}
+    Error:
+      description: Stable error envelope.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error:
+                type: object
+                required: [code, message]
+                properties: {code: {type: string}, message: {type: string}}

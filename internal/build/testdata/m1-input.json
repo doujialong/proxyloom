@@ -1,0 +1,74 @@
+{
+  "dns": {
+    "servers": [
+      {
+        "tag": "local-dns",
+        "address": "local"
+      }
+    ]
+  },
+  "outbounds": [
+    {
+      "type": "vless",
+      "tag": "Hong Kong",
+      "server": "198.51.100.10",
+      "server_port": 443,
+      "uuid": "00000000-0000-0000-0000-000000000001",
+      "tls": {
+        "enabled": true,
+        "server_name": "example.test",
+        "ech": {
+          "enabled": true,
+          "config": "AA==",
+          "future_number": 900719925474099312345
+        }
+      },
+      "transport": {
+        "type": "grpc",
+        "service_name": "edge"
+      },
+      "future_ratio": 1.2300
+    },
+    {
+      "type": "vless",
+      "tag": "Hong Kong",
+      "server": "198.51.100.10",
+      "server_port": 443,
+      "uuid": "00000000-0000-0000-0000-000000000001",
+      "tls": {
+        "enabled": true,
+        "server_name": "example.test",
+        "ech": {
+          "enabled": true,
+          "config": "AA==",
+          "future_number": 900719925474099312345
+        }
+      },
+      "transport": {
+        "type": "grpc",
+        "service_name": "edge"
+      },
+      "future_ratio": 1.2300
+    },
+    {
+      "type": "future-quic",
+      "tag": "Hong Kong",
+      "server": "203.0.113.20",
+      "server_port": 8443,
+      "experimental": {
+        "weight": 1E+09,
+        "nested": {
+          "enabled": true,
+          "mode": "future"
+        }
+      }
+    },
+    {
+      "type": "urltest",
+      "tag": "auto",
+      "outbounds": [
+        "Hong Kong"
+      ]
+    }
+  ]
+}

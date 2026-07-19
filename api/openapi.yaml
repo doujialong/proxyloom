@@ -1,0 +1,2710 @@
+openapi: 3.1.0
+info:
+  title: ProxyLoom Target Management API
+  version: 0.1.0-m0
+  summary: Target contract for the complete ProxyLoom self-hosted subscription manager.
+  description: |
+    This is the complete target contract, not evidence that every operation is running.
+    The current implemented surface is described by openapi-runtime.yaml.
+    All timestamps use RFC 3339. Resource IDs are lowercase UUIDv7 strings.
+    Cookie-authenticated unsafe requests also require X-CSRF-Token.
+    List cursors are opaque and expire after 15 minutes.
+  license:
+    name: AGPL-3.0-or-later
+    identifier: AGPL-3.0-or-later
+servers:
+  - url: /
+tags:
+  - name: System
+  - name: Authentication
+  - name: Sources
+  - name: Nodes
+  - name: Resources
+  - name: Outputs
+  - name: Jobs
+  - name: Compatibility
+  - name: Publications
+security:
+  - cookieAuth: []
+  - bearerAuth: []
+paths:
+  /healthz:
+    get:
+      tags: [System]
+      operationId: getHealth
+      summary: Report process liveness without secret details.
+      security: []
+      responses:
+        '200':
+          description: Process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /readyz:
+    get:
+      tags: [System]
+      operationId: getReadiness
+      summary: Report whether management and publication traffic can be served.
+      security: []
+      responses:
+        '200':
+          description: Service is ready.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+        '503':
+          description: Service is safely unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+  /api/v1/setup/status:
+    get:
+      tags: [System]
+      operationId: getSetupStatus
+      security: []
+      responses:
+        '200':
+          description: Non-secret initialization status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SetupStatus'
+  /api/v1/setup/admin:
+    post:
+      tags: [System]
+      operationId: initializeAdministrator
+      summary: Create the first administrator exactly once.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/SetupToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminSetupRequest'
+      responses:
+        '201':
+          description: Administrator initialized and session created.
+          headers:
+            Set-Cookie:
+              schema: {type: string}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /api/v1/session:
+    post:
+      tags: [Authentication]
+      operationId: createSession
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '201':
+          description: Authenticated session.
+          headers:
+            Set-Cookie:
+              schema: {type: string}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+    get:
+      tags: [Authentication]
+      operationId: getSession
+      responses:
+        '200':
+          description: Current session.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    delete:
+      tags: [Authentication]
+      operationId: deleteSession
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204':
+          description: Session revoked.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/session/reauthenticate:
+    post:
+      tags: [Authentication]
+      operationId: reauthenticateSession
+      summary: Extend the five-minute recent-authentication window for secret operations.
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [password]
+              properties:
+                password: {type: string, minLength: 1, maxLength: 1024, writeOnly: true}
+      responses:
+        '200':
+          description: Updated session and recent-authentication deadline.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Session'}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /api/v1/session/password:
+    post:
+      tags: [Authentication]
+      operationId: changeAdministratorPassword
+      summary: Change the current administrator password and revoke all sessions.
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [current_password, new_password]
+              properties:
+                current_password: {type: string, minLength: 1, maxLength: 1024, writeOnly: true}
+                new_password: {type: string, minLength: 1, maxLength: 1024, writeOnly: true}
+      responses:
+        '204':
+          description: Password changed and all sessions revoked.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/source-previews:
+    post:
+      tags: [Sources]
+      operationId: previewSource
+      description: Detect and parse bounded untrusted input without persisting a Source.
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourcePreviewRequest'
+      responses:
+        '200':
+          description: Detection and import-purpose preview.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourcePreview'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+  /api/v1/sources:
+    get:
+      tags: [Sources]
+      operationId: listSources
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [unknown, healthy, degraded, unhealthy, disabled]
+        - name: query
+          in: query
+          schema: {type: string, maxLength: 200}
+      responses:
+        '200':
+          description: Stable page ordered by updated_at desc then id desc.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourcePage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    post:
+      tags: [Sources]
+      operationId: createSource
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourceCreate'
+      responses:
+        '201':
+          description: Source with its first draft revision.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Source'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/sources/{sourceId}:
+    parameters:
+      - $ref: '#/components/parameters/SourceId'
+    get:
+      tags: [Sources]
+      operationId: getSource
+      responses:
+        '200':
+          description: Source details with secrets masked.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Source'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Sources]
+      operationId: updateSource
+      description: Creates a new immutable draft revision.
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              $ref: '#/components/schemas/SourcePatch'
+      responses:
+        '200':
+          description: Updated source and draft revision.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Source'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    delete:
+      tags: [Sources]
+      operationId: archiveSource
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204':
+          description: Source archived; referenced history is retained.
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+  /api/v1/sources/{sourceId}/publish:
+    post:
+      tags: [Sources]
+      operationId: publishSourceRevision
+      parameters:
+        - $ref: '#/components/parameters/SourceId'
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublishRevisionRequest'
+      responses:
+        '200':
+          description: Draft revision promoted to published.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Source'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/sources/{sourceId}/revisions:
+    get:
+      tags: [Sources]
+      operationId: listSourceRevisions
+      parameters:
+        - $ref: '#/components/parameters/SourceId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Immutable revision history ordered by number descending.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RevisionPage'}
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/sources/{sourceId}/refreshes:
+    post:
+      tags: [Sources]
+      operationId: refreshSource
+      parameters:
+        - $ref: '#/components/parameters/SourceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '202':
+          $ref: '#/components/responses/JobAccepted'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
+  /api/v1/config-exports/{exportId}/content:
+    get:
+      tags: [System]
+      operationId: downloadConfigurationExport
+      parameters:
+        - name: exportId
+          in: path
+          required: true
+          schema: {$ref: '#/components/schemas/Id'}
+      responses:
+        '200':
+          description: Versioned configuration export; secret exports require recent authentication.
+          headers:
+            Cache-Control:
+              schema: {type: string, const: no-store}
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        '403':
+          $ref: '#/components/responses/RecentAuthenticationRequired'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/sources/{sourceId}/refresh-attempts:
+    get:
+      tags: [Sources]
+      operationId: listRefreshAttempts
+      parameters:
+        - $ref: '#/components/parameters/SourceId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Attempts ordered by started_at desc then id desc.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RefreshAttemptPage'
+  /api/v1/sources/{sourceId}/snapshots:
+    get:
+      tags: [Sources]
+      operationId: listSnapshots
+      parameters:
+        - $ref: '#/components/parameters/SourceId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Accepted snapshots ordered by accepted_at desc then id desc.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SnapshotPage'
+  /api/v1/snapshots/{snapshotId}/diff:
+    get:
+      tags: [Sources]
+      operationId: getSnapshotDiff
+      parameters:
+        - name: snapshotId
+          in: path
+          required: true
+          schema: {$ref: '#/components/schemas/Id'}
+        - name: against
+          in: query
+          required: true
+          schema: {$ref: '#/components/schemas/Id'}
+      responses:
+        '200':
+          description: Added, removed, renamed, ambiguous and protocol-change summary.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SnapshotDiff'}
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/nodes:
+    get:
+      tags: [Nodes]
+      operationId: listNodes
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - name: source_id
+          in: query
+          schema: {$ref: '#/components/schemas/Id'}
+        - name: output_id
+          in: query
+          schema: {$ref: '#/components/schemas/Id'}
+        - name: protocol
+          in: query
+          schema: {type: string}
+        - name: health
+          in: query
+          schema:
+            $ref: '#/components/schemas/NodeHealthState'
+        - name: query
+          in: query
+          schema: {type: string, maxLength: 200}
+      responses:
+        '200':
+          description: Stable node occurrence page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodePage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /api/v1/nodes/{nodeOccurrenceId}:
+    get:
+      tags: [Nodes]
+      operationId: getNode
+      parameters:
+        - $ref: '#/components/parameters/NodeOccurrenceId'
+      responses:
+        '200':
+          description: Raw/canonical metadata and lineage; secret values remain masked.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/nodes/{nodeOccurrenceId}/health-records:
+    get:
+      tags: [Nodes]
+      operationId: listNodeHealthRecords
+      parameters:
+        - $ref: '#/components/parameters/NodeOccurrenceId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - name: output_id
+          in: query
+          required: true
+          schema: {$ref: '#/components/schemas/Id'}
+      responses:
+        '200':
+          description: Records ordered by observed_at desc then id desc.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthRecordPage'
+  /api/v1/nodes/{nodeOccurrenceId}/secret-view:
+    post:
+      tags: [Nodes]
+      operationId: revealNodeRawValue
+      summary: Return the current raw node once after recent authentication and audit the reveal.
+      parameters:
+        - $ref: '#/components/parameters/NodeOccurrenceId'
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '200':
+          description: Unmasked raw node. The response is never cached.
+          headers:
+            Cache-Control:
+              schema: {type: string, const: no-store}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/NodeSecretView'}
+        '403':
+          $ref: '#/components/responses/RecentAuthenticationRequired'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/nodes/{nodeOccurrenceId}/checks:
+    post:
+      tags: [Nodes]
+      operationId: checkNode
+      parameters:
+        - $ref: '#/components/parameters/NodeOccurrenceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [output_id]
+              properties:
+                output_id: {$ref: '#/components/schemas/Id'}
+      responses:
+        '202':
+          $ref: '#/components/responses/JobAccepted'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
+  /api/v1/node-checks:
+    post:
+      tags: [Nodes]
+      operationId: checkNodeScope
+      summary: Queue a source, output or all-node manual check with global Health Key deduplication.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/BulkNodeCheckRequest'}
+      responses:
+        '202':
+          $ref: '#/components/responses/JobAccepted'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/collections:
+    get:
+      tags: [Resources]
+      operationId: listCollections
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Collection page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevisionedResourcePage'
+    post:
+      tags: [Resources]
+      operationId: createCollection
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CollectionCreate'
+      responses:
+        '201':
+          $ref: '#/components/responses/RevisionedResourceCreated'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/pipelines:
+    get:
+      tags: [Resources]
+      operationId: listPipelines
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Pipeline page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevisionedResourcePage'
+    post:
+      tags: [Resources]
+      operationId: createPipeline
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PipelineCreate'
+      responses:
+        '201':
+          $ref: '#/components/responses/RevisionedResourceCreated'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/pipelines/{pipelineId}:
+    parameters:
+      - name: pipelineId
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/Id'}
+    get:
+      tags: [Resources]
+      operationId: getPipeline
+      responses:
+        '200':
+          description: Pipeline details.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RevisionedResource'}
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Resources]
+      operationId: updatePipeline
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PipelineCreate'}
+      responses:
+        '200':
+          description: Pipeline updated and affected Outputs queued for rebuild.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RevisionedResource'}
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/templates:
+    get:
+      tags: [Resources]
+      operationId: listTemplates
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Template page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevisionedResourcePage'
+    post:
+      tags: [Resources]
+      operationId: createTemplate
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TemplateCreate'
+      responses:
+        '201':
+          $ref: '#/components/responses/RevisionedResourceCreated'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/health-policies:
+    get:
+      tags: [Resources]
+      operationId: listHealthPolicies
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Health policy page.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RevisionedResourcePage'}
+    post:
+      tags: [Resources]
+      operationId: createHealthPolicy
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PolicyCreate'}
+      responses:
+        '201':
+          $ref: '#/components/responses/RevisionedResourceCreated'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/probe-profiles:
+    get:
+      tags: [Resources]
+      operationId: listProbeProfiles
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Probe profile page.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RevisionedResourcePage'}
+    post:
+      tags: [Resources]
+      operationId: createProbeProfile
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PolicyCreate'}
+      responses:
+        '201':
+          $ref: '#/components/responses/RevisionedResourceCreated'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/templates/{templateId}/refreshes:
+    post:
+      tags: [Resources]
+      operationId: refreshTemplate
+      parameters:
+        - name: templateId
+          in: path
+          required: true
+          schema: {$ref: '#/components/schemas/Id'}
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '202':
+          $ref: '#/components/responses/JobAccepted'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
+  /api/v1/resources/{resourceType}/{resourceId}:
+    parameters:
+      - name: resourceType
+        in: path
+        required: true
+        schema:
+          type: string
+          enum: [collections, pipelines, templates, health-policies, probe-profiles]
+      - name: resourceId
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/Id'}
+    get:
+      tags: [Resources]
+      operationId: getRevisionedResource
+      responses:
+        '200':
+          description: Resource details.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevisionedResource'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Resources]
+      operationId: updateRevisionedResource
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: New draft revision.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevisionedResource'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    delete:
+      tags: [Resources]
+      operationId: archiveRevisionedResource
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204':
+          description: Resource archived; referenced revisions remain retained.
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+  /api/v1/resources/{resourceType}/{resourceId}/publish:
+    parameters:
+      - name: resourceType
+        in: path
+        required: true
+        schema:
+          type: string
+          enum: [collections, pipelines, templates, health-policies, probe-profiles]
+      - name: resourceId
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/Id'}
+    post:
+      tags: [Resources]
+      operationId: publishResourceRevision
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PublishRevisionRequest'}
+      responses:
+        '200':
+          description: Draft revision promoted to published.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RevisionedResource'}
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/resources/{resourceType}/{resourceId}/revisions:
+    parameters:
+      - name: resourceType
+        in: path
+        required: true
+        schema:
+          type: string
+          enum: [collections, pipelines, templates, health-policies, probe-profiles]
+      - name: resourceId
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/Id'}
+    get:
+      tags: [Resources]
+      operationId: listResourceRevisions
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Immutable revision history ordered by number descending.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RevisionPage'}
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/outputs:
+    get:
+      tags: [Outputs]
+      operationId: listOutputs
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Output page ordered by updated_at desc then id desc.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OutputPage'
+    post:
+      tags: [Outputs]
+      operationId: createOutput
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OutputCreate'
+      responses:
+        '201':
+          description: Output with first draft revision.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Output'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/outputs/{outputId}:
+    parameters:
+      - $ref: '#/components/parameters/OutputId'
+    get:
+      tags: [Outputs]
+      operationId: getOutput
+      responses:
+        '200':
+          description: Output details and latest publication.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Output'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Outputs]
+      operationId: updateOutput
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              $ref: '#/components/schemas/OutputPatch'
+      responses:
+        '200':
+          description: New draft revision.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Output'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    delete:
+      tags: [Outputs]
+      operationId: archiveOutput
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204':
+          description: Output archived; current Artifact remains retained but token access is disabled.
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+  /api/v1/outputs/{outputId}/publish:
+    post:
+      tags: [Outputs]
+      operationId: publishOutputRevision
+      parameters:
+        - $ref: '#/components/parameters/OutputId'
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PublishRevisionRequest'}
+      responses:
+        '200':
+          description: Draft revision promoted; an affected build is enqueued separately.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Output'}
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/outputs/{outputId}/preview:
+    post:
+      tags: [Outputs]
+      operationId: previewOutput
+      parameters:
+        - $ref: '#/components/parameters/OutputId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BuildRequest'
+      responses:
+        '202':
+          $ref: '#/components/responses/JobAccepted'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
+  /api/v1/outputs/{outputId}/revisions:
+    get:
+      tags: [Outputs]
+      operationId: listOutputRevisions
+      parameters:
+        - $ref: '#/components/parameters/OutputId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Immutable revision history ordered by number descending.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RevisionPage'}
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/outputs/{outputId}/name-allocations:
+    get:
+      tags: [Outputs]
+      operationId: listNameAllocations
+      parameters:
+        - $ref: '#/components/parameters/OutputId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Current, reserved and filtered node name allocations.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/NameAllocationPage'}
+  /api/v1/outputs/{outputId}/name-allocations/{nodeOccurrenceId}:
+    patch:
+      tags: [Outputs]
+      operationId: lockNameAllocation
+      description: Creates a new Output draft revision; it never rewrites historical allocation snapshots.
+      parameters:
+        - $ref: '#/components/parameters/OutputId'
+        - $ref: '#/components/parameters/NodeOccurrenceId'
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  additionalProperties: false
+                  required: [locked, final_name]
+                  properties:
+                    locked: {type: boolean, const: true}
+                    final_name: {type: string, minLength: 1, maxLength: 512}
+                - type: object
+                  additionalProperties: false
+                  required: [locked]
+                  properties:
+                    locked: {type: boolean, const: false}
+      responses:
+        '200':
+          description: New draft revision and resulting allocation preview.
+          headers:
+            ETag: {$ref: '#/components/headers/ETag'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Output'}
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+  /api/v1/outputs/{outputId}/name-compaction-previews:
+    post:
+      tags: [Outputs]
+      operationId: previewNameCompaction
+      parameters:
+        - $ref: '#/components/parameters/OutputId'
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '200':
+          description: All proposed renames and a digest valid for 15 minutes.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/NameCompactionPreview'}
+  /api/v1/outputs/{outputId}/name-compactions:
+    post:
+      tags: [Outputs]
+      operationId: applyNameCompaction
+      parameters:
+        - $ref: '#/components/parameters/OutputId'
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [preview_id, preview_digest, confirmation]
+              properties:
+                preview_id: {$ref: '#/components/schemas/Id'}
+                preview_digest: {type: string, pattern: '^[0-9a-f]{64}$'}
+                confirmation: {type: string, const: COMPACT}
+      responses:
+        '202':
+          $ref: '#/components/responses/JobAccepted'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
+  /api/v1/outputs/{outputId}/builds:
+    post:
+      tags: [Outputs]
+      operationId: buildOutput
+      parameters:
+        - $ref: '#/components/parameters/OutputId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BuildRequest'
+      responses:
+        '202':
+          $ref: '#/components/responses/JobAccepted'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
+  /api/v1/outputs/{outputId}/artifacts:
+    get:
+      tags: [Outputs]
+      operationId: listArtifacts
+      parameters:
+        - $ref: '#/components/parameters/OutputId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Artifact history ordered by build_sequence desc.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactPage'
+  /api/v1/outputs/{outputId}/rollback:
+    post:
+      tags: [Outputs]
+      operationId: rollbackOutput
+      parameters:
+        - $ref: '#/components/parameters/OutputId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [artifact_id]
+              properties:
+                artifact_id: {$ref: '#/components/schemas/Id'}
+                reason: {type: string, minLength: 1, maxLength: 500}
+      responses:
+        '202':
+          $ref: '#/components/responses/JobAccepted'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/outputs/{outputId}/tokens:
+    post:
+      tags: [Outputs]
+      operationId: rotatePublicationToken
+      description: Returns token plaintext exactly once and revokes the prior token by default.
+      parameters:
+        - $ref: '#/components/parameters/OutputId'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                revoke_existing: {type: boolean, default: true}
+      responses:
+        '201':
+          description: New publication URL, shown once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicationCredential'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '403':
+          $ref: '#/components/responses/RecentAuthenticationRequired'
+  /api/v1/outputs/{outputId}/tokens/{tokenId}:
+    delete:
+      tags: [Outputs]
+      operationId: revokePublicationToken
+      parameters:
+        - $ref: '#/components/parameters/OutputId'
+        - name: tokenId
+          in: path
+          required: true
+          schema: {$ref: '#/components/schemas/Id'}
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204':
+          description: Token revoked immediately and audit event written.
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/artifacts/{artifactId}:
+    get:
+      tags: [Outputs]
+      operationId: getArtifact
+      parameters:
+        - name: artifactId
+          in: path
+          required: true
+          schema: {$ref: '#/components/schemas/Id'}
+      responses:
+        '200':
+          description: Artifact metadata, manifest and validation summary.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/artifacts/{artifactId}/content:
+    get:
+      tags: [Outputs]
+      operationId: downloadArtifact
+      parameters:
+        - name: artifactId
+          in: path
+          required: true
+          schema: {$ref: '#/components/schemas/Id'}
+      responses:
+        '200':
+          description: Decrypted immutable Artifact content for an authenticated administrator.
+          headers:
+            Cache-Control:
+              schema: {type: string, const: no-store}
+          content:
+            application/json:
+              schema: {}
+            text/plain:
+              schema: {type: string}
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '403':
+          $ref: '#/components/responses/RecentAuthenticationRequired'
+  /api/v1/jobs:
+    get:
+      tags: [Jobs]
+      operationId: listJobs
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - name: type
+          in: query
+          schema: {$ref: '#/components/schemas/JobType'}
+        - name: status
+          in: query
+          schema: {$ref: '#/components/schemas/JobStatus'}
+      responses:
+        '200':
+          description: Jobs ordered by created_at desc then id desc.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobPage'
+  /api/v1/config-exports:
+    post:
+      tags: [System]
+      operationId: exportConfiguration
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                include_secrets: {type: boolean, default: false}
+      responses:
+        '202':
+          $ref: '#/components/responses/JobAccepted'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
+        '403':
+          $ref: '#/components/responses/RecentAuthenticationRequired'
+  /api/v1/config-import-previews:
+    post:
+      tags: [System]
+      operationId: previewConfigurationImport
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [document]
+              properties:
+                document: {type: string, format: binary, writeOnly: true}
+      responses:
+        '200':
+          description: Version, conflicts, changes and validation errors; nothing is persisted.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ImportPreview'}
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+  /api/v1/config-imports:
+    post:
+      tags: [System]
+      operationId: importConfiguration
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [preview_id, preview_digest, confirmation]
+              properties:
+                preview_id: {$ref: '#/components/schemas/Id'}
+                preview_digest: {type: string, pattern: '^[0-9a-f]{64}$'}
+                confirmation: {type: string, const: IMPORT}
+      responses:
+        '202':
+          $ref: '#/components/responses/JobAccepted'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
+  /api/v1/backups/{backupId}/content:
+    get:
+      tags: [System]
+      operationId: downloadBackup
+      parameters:
+        - name: backupId
+          in: path
+          required: true
+          schema: {$ref: '#/components/schemas/Id'}
+      responses:
+        '200':
+          description: Self-contained encrypted managed backup container.
+          headers:
+            Cache-Control:
+              schema: {type: string, const: no-store}
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '403':
+          $ref: '#/components/responses/RecentAuthenticationRequired'
+  /api/v1/backups:
+    post:
+      tags: [System]
+      operationId: createBackup
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/BackupRequest'}
+      responses:
+        '202':
+          $ref: '#/components/responses/JobAccepted'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
+        '403':
+          $ref: '#/components/responses/RecentAuthenticationRequired'
+  /api/v1/restore-previews:
+    post:
+      tags: [System]
+      operationId: previewRestore
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              oneOf:
+                - type: object
+                  additionalProperties: false
+                  required: [backup_document, passphrase]
+                  properties:
+                    backup_document: {type: string, format: binary, writeOnly: true}
+                    passphrase: {type: string, writeOnly: true, minLength: 12, maxLength: 1024}
+                - type: object
+                  additionalProperties: false
+                  required: [backup_document, recipient_private_key]
+                  properties:
+                    backup_document: {type: string, format: binary, writeOnly: true}
+                    recipient_private_key: {type: string, writeOnly: true, maxLength: 16384}
+                - type: object
+                  additionalProperties: false
+                  required: [backup_document]
+                  properties:
+                    backup_document: {type: string, format: binary, writeOnly: true}
+      responses:
+        '200':
+          description: Isolated validation and impact report; current data is unchanged.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RestorePreview'}
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/restores:
+    post:
+      tags: [System]
+      operationId: restoreBackup
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [preview_id, preview_digest, confirmation]
+              properties:
+                preview_id: {$ref: '#/components/schemas/Id'}
+                preview_digest: {type: string, pattern: '^[0-9a-f]{64}$'}
+                confirmation: {type: string, const: RESTORE}
+      responses:
+        '202':
+          $ref: '#/components/responses/JobAccepted'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
+  /api/v1/jobs/{jobId}:
+    get:
+      tags: [Jobs]
+      operationId: getJob
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: Job state and sanitized result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/jobs/{jobId}/cancel:
+    post:
+      tags: [Jobs]
+      operationId: cancelJob
+      description: Only queued jobs and explicitly cancellable running jobs can be cancelled.
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '202':
+          description: Cancellation accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/health/capacity:
+    get:
+      tags: [Nodes]
+      operationId: getHealthCapacity
+      responses:
+        '200':
+          description: Global unique queue size, coverage, observed latency and estimated cycle.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/HealthCapacity'}
+  /api/v1/probe-batches:
+    get:
+      tags: [Nodes]
+      operationId: listProbeBatches
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - name: output_id
+          in: query
+          schema: {$ref: '#/components/schemas/Id'}
+      responses:
+        '200':
+          description: Batch protection decisions and eligible sample counts.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProbeBatchPage'}
+  /api/v1/audit-events:
+    get:
+      tags: [System]
+      operationId: listAuditEvents
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - name: action
+          in: query
+          schema: {type: string}
+        - name: resource_id
+          in: query
+          schema: {$ref: '#/components/schemas/Id'}
+      responses:
+        '200':
+          description: Redacted security audit events ordered newest first.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AuditEventPage'}
+  /api/v1/system/key-rotations:
+    post:
+      tags: [System]
+      operationId: rotateMasterKey
+      summary: Prepare and activate a locally-created master.key.next without transmitting key material.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [prepared_key_id, confirmation]
+              properties:
+                prepared_key_id: {$ref: '#/components/schemas/Id'}
+                confirmation: {type: string, const: ROTATE}
+      responses:
+        '202':
+          $ref: '#/components/responses/JobAccepted'
+        '403':
+          $ref: '#/components/responses/RecentAuthenticationRequired'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/settings:
+    get:
+      tags: [System]
+      operationId: getSettings
+      responses:
+        '200':
+          description: Non-secret global limits and defaults.
+          headers:
+            ETag: {$ref: '#/components/headers/ETag'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SystemSettings'}
+    patch:
+      tags: [System]
+      operationId: updateSettings
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema: {$ref: '#/components/schemas/SystemSettings'}
+      responses:
+        '200':
+          description: Updated settings.
+          headers:
+            ETag: {$ref: '#/components/headers/ETag'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SystemSettings'}
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/protocol-capabilities:
+    get:
+      tags: [Compatibility]
+      operationId: listProtocolCapabilities
+      parameters:
+        - name: protocol
+          in: query
+          schema: {type: string}
+        - name: target_profile
+          in: query
+          schema: {type: string}
+        - name: phase
+          in: query
+          schema: {type: string, enum: [M1, M3, M4, M5, continuous]}
+      responses:
+        '200':
+          description: Six-dimensional capabilities; design_only is not runtime support.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [matrix_version, implementation_status, items]
+                properties:
+                  matrix_version: {type: string}
+                  implementation_status: {type: string, enum: [not_started, in_progress, implemented]}
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/ProtocolCapability'}
+  /api/v1/target-profiles:
+    get:
+      tags: [Compatibility]
+      operationId: listTargetProfiles
+      responses:
+        '200':
+          description: Version-frozen target profiles.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/TargetProfile'}
+  /subscriptions/{token}:
+    get:
+      tags: [Publications]
+      operationId: getPublishedSubscription
+      summary: Return the last valid artifact bound to a high-entropy read-only token.
+      security: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          description: Secret path segment. Access logs must redact it.
+          schema: {type: string, minLength: 43, maxLength: 128}
+        - name: If-None-Match
+          in: header
+          schema: {type: string}
+        - name: If-Modified-Since
+          in: header
+          schema: {type: string}
+      responses:
+        '200':
+          description: Last valid immutable artifact.
+          headers:
+            ETag: {$ref: '#/components/headers/ETag'}
+            Last-Modified:
+              schema: {type: string}
+            Cache-Control:
+              schema: {type: string, const: 'private, no-cache'}
+            Referrer-Policy:
+              schema: {type: string, const: no-referrer}
+            X-Content-Type-Options:
+              schema: {type: string, const: nosniff}
+          content:
+            application/json:
+              schema: {}
+            text/plain:
+              schema: {type: string}
+        '304':
+          description: Artifact is unchanged.
+        '401':
+          description: Token is invalid or revoked; response does not reveal output existence.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorResponse'}
+        '404':
+          description: Token is valid but no artifact has ever been published.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorResponse'}
+        '503':
+          description: Instance is not ready; no empty artifact is returned.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorResponse'}
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: proxyloom_session
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+  headers:
+    ETag:
+      description: Strong opaque revision or artifact validator.
+      schema: {type: string}
+  parameters:
+    SetupToken:
+      name: X-ProxyLoom-Setup-Token
+      in: header
+      required: true
+      description: One-time 256-bit token generated locally by proxyloom bootstrap-token; expires in 30 minutes.
+      schema: {type: string, minLength: 43, maxLength: 128}
+    Limit:
+      name: limit
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 200, default: 50}
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque cursor bound to the filter and sort; expires after 15 minutes.
+      schema: {type: string, maxLength: 2048}
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      schema: {type: string}
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Opaque 1-128 character key retained for 24 hours. Reuse with a different body returns 409.
+      schema: {type: string, minLength: 1, maxLength: 128}
+    CsrfToken:
+      name: X-CSRF-Token
+      in: header
+      required: false
+      description: Required for unsafe requests authenticated by cookie; ignored for bearer authentication.
+      schema: {type: string, minLength: 32, maxLength: 256}
+    SourceId:
+      name: sourceId
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Id'}
+    OutputId:
+      name: outputId
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Id'}
+    NodeOccurrenceId:
+      name: nodeOccurrenceId
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Id'}
+    JobId:
+      name: jobId
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Id'}
+  responses:
+    BadRequest:
+      description: Request syntax, cursor, filter or sort is invalid.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    Unauthorized:
+      description: Authentication failed.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    RecentAuthenticationRequired:
+      description: The operation reveals or exports secrets and requires reauthentication within five minutes.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    NotFound:
+      description: Resource does not exist or is not visible.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    Conflict:
+      description: Current resource state conflicts with the operation.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    IdempotencyConflict:
+      description: Idempotency key was reused with a different request digest.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    PreconditionFailed:
+      description: If-Match is stale. Error details include current_etag and current_revision_id.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    ValidationError:
+      description: Semantically invalid request with field-level details.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    PayloadTooLarge:
+      description: Compressed, decoded, expanded or parsed input exceeded a configured hard limit.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    RateLimited:
+      description: Rate limit exceeded.
+      headers:
+        Retry-After:
+          schema: {type: integer, minimum: 1}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    JobAccepted:
+      description: Durable asynchronous job accepted. Client disconnect does not cancel it.
+      headers:
+        Location:
+          schema: {type: string}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/JobReference'}
+    RevisionedResourceCreated:
+      description: Resource with first immutable draft revision.
+      headers:
+        ETag:
+          $ref: '#/components/headers/ETag'
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/RevisionedResource'}
+  schemas:
+    Id:
+      type: string
+      format: uuid
+      pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    Timestamp:
+      type: string
+      format: date-time
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message, correlation_id]
+          properties:
+            code:
+              type: string
+              pattern: '^[a-z][a-z0-9_]{2,63}$'
+              examples: [validation_failed]
+            message: {type: string}
+            correlation_id: {type: string}
+            details:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required: [code]
+                properties:
+                  field: {type: string}
+                  code: {type: string}
+                  message: {type: string}
+                  meta: {type: object, additionalProperties: true}
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required: [status, version]
+      properties:
+        status: {type: string, const: alive}
+        version: {type: string}
+    ReadinessResponse:
+      type: object
+      additionalProperties: false
+      required: [ready, code]
+      properties:
+        ready: {type: boolean}
+        code:
+          type: string
+          enum: [ready, setup_required, master_key_missing, master_key_invalid, crypto_integrity_failed, migration_required, migration_failed, storage_unavailable]
+    SetupStatus:
+      type: object
+      additionalProperties: false
+      required: [administrator_initialized, master_key, database]
+      properties:
+        administrator_initialized: {type: boolean}
+        master_key: {type: string, enum: [valid, missing, invalid_permissions, invalid_format, invalid]}
+        database: {type: string, enum: [ready, migration_required, migration_failed, unavailable]}
+    AdminSetupRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username: {type: string, minLength: 3, maxLength: 64}
+        password: {type: string, minLength: 1, maxLength: 1024, writeOnly: true}
+        timezone: {type: string, default: Asia/Shanghai}
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username: {type: string, minLength: 1, maxLength: 64}
+        password: {type: string, minLength: 1, maxLength: 1024, writeOnly: true}
+    Session:
+      type: object
+      additionalProperties: false
+      required: [administrator, csrf_token, expires_at, recent_auth_until]
+      properties:
+        administrator:
+          type: object
+          required: [id, username]
+          properties:
+            id: {$ref: '#/components/schemas/Id'}
+            username: {type: string}
+        csrf_token: {type: string, readOnly: true}
+        expires_at: {$ref: '#/components/schemas/Timestamp'}
+        recent_auth_until: {$ref: '#/components/schemas/Timestamp'}
+    PageInfo:
+      type: object
+      additionalProperties: false
+      required: [has_more]
+      properties:
+        has_more: {type: boolean}
+        next_cursor: {type: [string, 'null']}
+    SourceKind:
+      type: string
+      enum: [remote, inline, upload]
+    ImportPurpose:
+      type: string
+      enum: [node_source, template, template_and_nodes, raw_passthrough]
+    SourceInput:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [kind, url]
+          properties:
+            kind: {type: string, const: remote}
+            url: {type: string, format: uri, writeOnly: true}
+            format_hint: {type: [string, 'null']}
+            headers:
+              type: object
+              writeOnly: true
+              additionalProperties: {type: string, maxLength: 8192}
+            proxy_url: {type: string, format: uri, writeOnly: true, description: HTTP, HTTPS, SOCKS5 or SOCKS5H proxy used only for this source.}
+            private_network_authorized: {type: boolean, default: false}
+        - type: object
+          additionalProperties: false
+          required: [kind, content]
+          properties:
+            kind: {type: string, enum: [inline, upload]}
+            content: {type: string, writeOnly: true, maxLength: 52428800}
+            format_hint: {type: [string, 'null']}
+    SourcePolicy:
+      type: object
+      additionalProperties: false
+      properties:
+        refresh_schedule: {type: [string, 'null'], description: Five-field cron or null for manual only.}
+        timezone: {type: string, default: UTC}
+        timeout_seconds: {type: integer, minimum: 1, maximum: 120, default: 30}
+        retry_count: {type: integer, minimum: 0, maximum: 5, default: 2}
+        max_response_bytes: {type: integer, minimum: 1024, maximum: 52428800, default: 10485760}
+        minimum_nodes: {type: integer, minimum: 0, maximum: 100000, default: 1}
+        maximum_drop_ratio: {type: number, minimum: 0, maximum: 1, default: 0.5}
+        accept_empty: {type: boolean, default: false}
+    SourcePreviewRequest:
+      type: object
+      additionalProperties: false
+      required: [input]
+      properties:
+        input: {$ref: '#/components/schemas/SourceInput'}
+        import_purpose: {$ref: '#/components/schemas/ImportPurpose'}
+    SourcePreview:
+      type: object
+      additionalProperties: false
+      required: [detected_format, candidates, node_count, protocol_counts, purposes, warnings]
+      properties:
+        detected_format: {type: [string, 'null']}
+        candidates:
+          type: array
+          items:
+            type: object
+            required: [format, confidence, reason]
+            properties:
+              format: {type: string}
+              confidence: {type: number, minimum: 0, maximum: 1}
+              reason: {type: string}
+        node_count: {type: integer, minimum: 0}
+        protocol_counts: {type: object, additionalProperties: {type: integer, minimum: 0}}
+        purposes:
+          type: array
+          items:
+            type: object
+            required: [purpose, retained_top_level, ignored_top_level, proxy_nodes, logical_outbounds]
+            properties:
+              purpose: {$ref: '#/components/schemas/ImportPurpose'}
+              retained_top_level: {type: array, items: {type: string}}
+              ignored_top_level: {type: array, items: {type: string}}
+              proxy_nodes: {type: integer, minimum: 0}
+              logical_outbounds: {type: integer, minimum: 0}
+        warnings: {type: array, items: {$ref: '#/components/schemas/Warning'}}
+    SourceCreate:
+      type: object
+      additionalProperties: false
+      required: [display_name, input, import_purpose]
+      properties:
+        display_name: {type: string, minLength: 1, maxLength: 200}
+        input: {$ref: '#/components/schemas/SourceInput'}
+        import_purpose: {$ref: '#/components/schemas/ImportPurpose'}
+        policy: {$ref: '#/components/schemas/SourcePolicy'}
+    SourcePatch:
+      type: object
+      minProperties: 1
+      properties:
+        display_name: {type: string, minLength: 1, maxLength: 200}
+        input: {$ref: '#/components/schemas/SourceInput'}
+        import_purpose: {$ref: '#/components/schemas/ImportPurpose'}
+        policy: {$ref: '#/components/schemas/SourcePolicy'}
+    RevisionRef:
+      type: object
+      additionalProperties: false
+      required: [id, number, state, created_at]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        number: {type: integer, minimum: 1}
+        state: {type: string, enum: [draft, published, superseded, archived]}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+    Source:
+      type: object
+      additionalProperties: false
+      required: [id, display_name, lifecycle_state, health, draft_revision, created_at, updated_at]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        display_name: {type: string}
+        lifecycle_state: {type: string, enum: [active, archived]}
+        health: {type: string, enum: [unknown, healthy, degraded, unhealthy, disabled]}
+        stale: {type: boolean}
+        draft_revision: {$ref: '#/components/schemas/RevisionRef'}
+        published_revision:
+          anyOf: [{$ref: '#/components/schemas/RevisionRef'}, {type: 'null'}]
+        current_snapshot_id:
+          anyOf: [{$ref: '#/components/schemas/Id'}, {type: 'null'}]
+        masked_location: {type: [string, 'null']}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        updated_at: {$ref: '#/components/schemas/Timestamp'}
+    SourcePage:
+      type: object
+      required: [items, page]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/Source'}}
+        page: {$ref: '#/components/schemas/PageInfo'}
+    PublishRevisionRequest:
+      type: object
+      additionalProperties: false
+      required: [revision_id]
+      properties:
+        revision_id: {$ref: '#/components/schemas/Id'}
+    RefreshAttempt:
+      type: object
+      required: [id, status, trigger, started_at, warning_count]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        status: {type: string, enum: [running, succeeded, not_modified, rejected, failed]}
+        trigger: {type: string, enum: [manual, schedule, retry, import]}
+        http_status: {type: [integer, 'null']}
+        total_ms: {type: [integer, 'null'], minimum: 0}
+        node_count: {type: [integer, 'null'], minimum: 0}
+        warning_count: {type: integer, minimum: 0}
+        error_code: {type: [string, 'null']}
+        accepted_snapshot_id:
+          anyOf: [{$ref: '#/components/schemas/Id'}, {type: 'null'}]
+        started_at: {$ref: '#/components/schemas/Timestamp'}
+        finished_at:
+          anyOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]
+    RefreshAttemptPage:
+      type: object
+      required: [items, page]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/RefreshAttempt'}}
+        page: {$ref: '#/components/schemas/PageInfo'}
+    Snapshot:
+      type: object
+      required: [id, node_count, warning_count, accepted_at, stale]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        node_count: {type: integer, minimum: 0}
+        logical_outbound_count: {type: integer, minimum: 0}
+        warning_count: {type: integer, minimum: 0}
+        stale: {type: boolean}
+        accepted_at: {$ref: '#/components/schemas/Timestamp'}
+    SnapshotPage:
+      type: object
+      required: [items, page]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/Snapshot'}}
+        page: {$ref: '#/components/schemas/PageInfo'}
+    NodeHealthState:
+      type: string
+      enum: [unchecked, checking, healthy, degraded, unhealthy, unsupported, disabled]
+    NodeSummary:
+      type: object
+      required: [id, source_id, protocol, original_name, occurrence_state, fingerprint_kind]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        source_id: {$ref: '#/components/schemas/Id'}
+        protocol: {type: string}
+        original_name: {type: string}
+        occurrence_state: {type: string, enum: [present, absent, retired]}
+        fingerprint_kind: {type: string, enum: [semantic, opaque_structural]}
+        health:
+          anyOf: [{$ref: '#/components/schemas/NodeHealthState'}, {type: 'null'}]
+        stale: {type: boolean}
+        last_seen_at: {$ref: '#/components/schemas/Timestamp'}
+    NodeDetail:
+      allOf:
+        - $ref: '#/components/schemas/NodeSummary'
+        - type: object
+          properties:
+            lineage:
+              type: array
+              items:
+                type: object
+                required: [snapshot_id, raw_node_id, match_method]
+                properties:
+                  snapshot_id: {$ref: '#/components/schemas/Id'}
+                  raw_node_id: {$ref: '#/components/schemas/Id'}
+                  match_method: {type: string}
+            canonical_completeness: {type: string, enum: [complete, partial, opaque]}
+            warnings: {type: array, items: {$ref: '#/components/schemas/Warning'}}
+    NodePage:
+      type: object
+      required: [items, page]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/NodeSummary'}}
+        page: {$ref: '#/components/schemas/PageInfo'}
+    HealthRecord:
+      type: object
+      required: [id, level, result, success, node_attributable, total_ms, observed_at, stale]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        level: {type: string, enum: [endpoint, proxy_http, capability, control]}
+        result:
+          type: string
+          enum: [success, dns_failure, connect_timeout, connect_refused, auth_failure, tls_failure, protocol_failure, unexpected_status, target_failure, executor_unsupported, executor_crash, resource_limited, cancelled]
+        success: {type: boolean}
+        node_attributable: {type: boolean}
+        total_ms: {type: integer, minimum: 0}
+        observed_at: {$ref: '#/components/schemas/Timestamp'}
+        stale: {type: boolean}
+        executor: {type: string}
+        executor_version: {type: string}
+    HealthRecordPage:
+      type: object
+      required: [items, page]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/HealthRecord'}}
+        page: {$ref: '#/components/schemas/PageInfo'}
+    CollectionCreate:
+      type: object
+      additionalProperties: false
+      required: [display_name, members]
+      properties:
+        display_name: {type: string, minLength: 1, maxLength: 200}
+        members:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items:
+            type: object
+            additionalProperties: false
+            required: [kind, id]
+            properties:
+              kind: {type: string, enum: [source, node_occurrence]}
+              id: {$ref: '#/components/schemas/Id'}
+              enabled: {type: boolean, default: true}
+    PipelineCreate:
+      type: object
+      additionalProperties: false
+      required: [display_name, operations]
+      properties:
+        display_name: {type: string, minLength: 1, maxLength: 200}
+        operations:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            additionalProperties: false
+            required: [type, schema_version, config]
+            properties:
+              type: {type: string, enum: [filter, rename, sort, set_field, remove_field, group]}
+              schema_version: {type: integer, minimum: 1}
+              config: {type: object, additionalProperties: true}
+    TemplateCreate:
+      type: object
+      additionalProperties: false
+      required: [display_name, source_type, target_format, content]
+      properties:
+        display_name: {type: string, minLength: 1, maxLength: 200}
+        source_type: {type: string, enum: [inline, upload, remote, source_snapshot]}
+        target_format: {type: string}
+        content: {type: string, writeOnly: true, maxLength: 52428800}
+        private_network_authorized: {type: boolean, default: false}
+    RevisionedResource:
+      type: object
+      required: [id, type, display_name, lifecycle_state, draft_revision, created_at, updated_at]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        type: {type: string, enum: [collection, pipeline, template, health_policy, probe_profile]}
+        display_name: {type: string}
+        lifecycle_state: {type: string, enum: [active, archived]}
+        draft_revision: {$ref: '#/components/schemas/RevisionRef'}
+        published_revision:
+          anyOf: [{$ref: '#/components/schemas/RevisionRef'}, {type: 'null'}]
+        configuration: {type: object, additionalProperties: true}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        updated_at: {$ref: '#/components/schemas/Timestamp'}
+    RevisionedResourcePage:
+      type: object
+      required: [items, page]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/RevisionedResource'}}
+        page: {$ref: '#/components/schemas/PageInfo'}
+    OutputCreate:
+      type: object
+      additionalProperties: false
+      required: [display_name, collection_revision_id, pipeline_revision_id, target_profile_id, target_profile_version, health_policy_revision_id, probe_profile_revision_id, output_shape]
+      properties:
+        display_name: {type: string, minLength: 1, maxLength: 200}
+        collection_revision_id: {$ref: '#/components/schemas/Id'}
+        pipeline_revision_id: {$ref: '#/components/schemas/Id'}
+        template_revision_id:
+          anyOf: [{$ref: '#/components/schemas/Id'}, {type: 'null'}]
+        target_profile_id: {type: string}
+        target_profile_version: {type: integer, minimum: 1}
+        health_policy_revision_id: {$ref: '#/components/schemas/Id'}
+        probe_profile_revision_id: {$ref: '#/components/schemas/Id'}
+        output_shape: {type: string, enum: [outbounds_array, outbounds_object, full_config]}
+        exclude_health: {type: array, items: {$ref: '#/components/schemas/NodeHealthState'}}
+        minimum_nodes: {type: integer, minimum: 1, maximum: 100000, default: 1}
+        maximum_drop_ratio: {type: number, minimum: 0, maximum: 1, default: 0.5}
+    OutputPatch:
+      type: object
+      minProperties: 1
+      properties:
+        display_name: {type: string, minLength: 1, maxLength: 200}
+        collection_revision_id: {$ref: '#/components/schemas/Id'}
+        pipeline_revision_id: {$ref: '#/components/schemas/Id'}
+        template_revision_id:
+          anyOf: [{$ref: '#/components/schemas/Id'}, {type: 'null'}]
+        target_profile_id: {type: string}
+        target_profile_version: {type: integer, minimum: 1}
+        health_policy_revision_id: {$ref: '#/components/schemas/Id'}
+        probe_profile_revision_id: {$ref: '#/components/schemas/Id'}
+        output_shape: {type: string, enum: [outbounds_array, outbounds_object, full_config]}
+        exclude_health: {type: array, items: {$ref: '#/components/schemas/NodeHealthState'}}
+        minimum_nodes: {type: integer, minimum: 1, maximum: 100000}
+        maximum_drop_ratio: {type: number, minimum: 0, maximum: 1}
+    Output:
+      type: object
+      required: [id, display_name, lifecycle_state, draft_revision, publication_mode, created_at, updated_at]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        display_name: {type: string}
+        lifecycle_state: {type: string, enum: [active, archived]}
+        draft_revision: {$ref: '#/components/schemas/RevisionRef'}
+        published_revision:
+          anyOf: [{$ref: '#/components/schemas/RevisionRef'}, {type: 'null'}]
+        publication_mode: {type: string, enum: [automatic, manual_lock]}
+        current_artifact_id:
+          anyOf: [{$ref: '#/components/schemas/Id'}, {type: 'null'}]
+        latest_build_status: {type: [string, 'null'], enum: [building, validated, rejected, publishable, null]}
+        publication_token_hint: {type: [string, 'null']}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        updated_at: {$ref: '#/components/schemas/Timestamp'}
+    OutputPage:
+      type: object
+      required: [items, page]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/Output'}}
+        page: {$ref: '#/components/schemas/PageInfo'}
+    BuildRequest:
+      type: object
+      additionalProperties: false
+      required: [output_revision_id]
+      properties:
+        output_revision_id: {$ref: '#/components/schemas/Id'}
+        publish_on_success: {type: boolean, default: false}
+        reason: {type: string, minLength: 1, maxLength: 500, default: manual}
+    Artifact:
+      type: object
+      required: [id, output_id, output_revision_id, build_sequence, status, reason, created_at]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        output_id: {$ref: '#/components/schemas/Id'}
+        output_revision_id: {$ref: '#/components/schemas/Id'}
+        build_sequence: {type: integer, minimum: 1}
+        status: {type: string, enum: [building, validated, rejected, publishable]}
+        reason: {type: string}
+        node_count: {type: [integer, 'null'], minimum: 0}
+        warning_count: {type: integer, minimum: 0}
+        sha256: {type: [string, 'null'], pattern: '^[0-9a-f]{64}$'}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        completed_at:
+          anyOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]
+    ArtifactDetail:
+      allOf:
+        - $ref: '#/components/schemas/Artifact'
+        - type: object
+          properties:
+            manifest: {type: object, additionalProperties: true}
+            validations:
+              type: array
+              items:
+                type: object
+                required: [strength, validator, version, status]
+                properties:
+                  strength: {type: string, enum: [structural, semantic_internal, target_binary]}
+                  validator: {type: string}
+                  version: {type: string}
+                  status: {type: string, enum: [passed, failed, skipped]}
+            diff_summary: {type: object, additionalProperties: true}
+    ArtifactPage:
+      type: object
+      required: [items, page]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/Artifact'}}
+        page: {$ref: '#/components/schemas/PageInfo'}
+    PublicationCredential:
+      type: object
+      additionalProperties: false
+      required: [token_id, token, url, created_at]
+      properties:
+        token_id: {$ref: '#/components/schemas/Id'}
+        token: {type: string, readOnly: true}
+        url: {type: string, readOnly: true}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+    JobType:
+      type: string
+      enum: [source_refresh, node_probe, output_build, cleanup, template_refresh, backup, restore, key_rotation, config_export, name_compaction, import]
+    JobStatus:
+      type: string
+      enum: [queued, leased, running, succeeded, failed, cancelled, dead]
+    Job:
+      type: object
+      required: [id, type, status, priority, attempt, progress, correlation_id, created_at]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        type: {$ref: '#/components/schemas/JobType'}
+        status: {$ref: '#/components/schemas/JobStatus'}
+        priority: {type: integer}
+        attempt: {type: integer, minimum: 0}
+        progress:
+          type: object
+          required: [current]
+          properties:
+            current: {type: integer, minimum: 0}
+            total: {type: [integer, 'null'], minimum: 0}
+        error:
+          type: [object, 'null']
+          properties:
+            code: {type: string}
+            message: {type: string}
+        result: {type: [object, 'null'], additionalProperties: true}
+        correlation_id: {type: string}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        started_at:
+          anyOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]
+        finished_at:
+          anyOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]
+    JobReference:
+      type: object
+      additionalProperties: false
+      required: [job_id, status, location]
+      properties:
+        job_id: {$ref: '#/components/schemas/Id'}
+        status: {type: string, const: queued}
+        location: {type: string}
+    JobPage:
+      type: object
+      required: [items, page]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/Job'}}
+        page: {$ref: '#/components/schemas/PageInfo'}
+    CapabilityDimension:
+      type: object
+      additionalProperties: false
+      required: [current, target_phase]
+      properties:
+        current: {type: string, enum: [not_implemented, implemented, partial, blocked, not_applicable]}
+        target_phase: {type: [string, 'null'], enum: [M1, M3, M4, M5, continuous, null]}
+        formats: {type: array, items: {type: string}}
+        targets: {type: array, items: {type: string}}
+        executors: {type: array, items: {type: string}}
+        evidence: {type: array, items: {type: string}}
+        limitations: {type: array, items: {type: string}}
+        deliveries:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [phase, format, mode]
+            properties:
+              phase: {type: string, enum: [M1, M3, M4, M5, continuous]}
+              format: {type: string}
+              mode: {type: string}
+    ProtocolCapability:
+      type: object
+      additionalProperties: false
+      required: [protocol_id, display_name, ecosystems, capability]
+      properties:
+        protocol_id: {type: string}
+        display_name: {type: string}
+        aliases: {type: array, items: {type: string}}
+        ecosystems: {type: array, items: {type: string}}
+        notes: {type: array, items: {type: string}}
+        capability:
+          type: object
+          additionalProperties: false
+          required: [recognize, lossless_passthrough, normalize, edit_convert, real_health_check, target_validation]
+          properties:
+            recognize: {$ref: '#/components/schemas/CapabilityDimension'}
+            lossless_passthrough: {$ref: '#/components/schemas/CapabilityDimension'}
+            normalize: {$ref: '#/components/schemas/CapabilityDimension'}
+            edit_convert: {$ref: '#/components/schemas/CapabilityDimension'}
+            real_health_check: {$ref: '#/components/schemas/CapabilityDimension'}
+            target_validation: {$ref: '#/components/schemas/CapabilityDimension'}
+    TargetProfile:
+      type: object
+      additionalProperties: false
+      required: [id, profile_version, client, client_exact_version, core, core_exact_version, format_family, phase, status, source_verification]
+      properties:
+        id: {type: string}
+        profile_version: {type: integer, minimum: 1}
+        client: {type: string}
+        client_exact_version: {type: string}
+        core: {type: string}
+        core_exact_version: {type: string}
+        format_family: {type: string}
+        phase: {type: string}
+        status: {type: string, enum: [p0_baseline, compatibility_target, research_baseline, retired]}
+        source_verification: {type: string, enum: [verified, pending_user_confirmation]}
+    RevisionPage:
+      type: object
+      additionalProperties: false
+      required: [items, page]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/RevisionRef'}}
+        page: {$ref: '#/components/schemas/PageInfo'}
+    SnapshotDiff:
+      type: object
+      additionalProperties: false
+      required: [snapshot_id, against_snapshot_id, added, removed, renamed, protocol_changed, ambiguous]
+      properties:
+        snapshot_id: {$ref: '#/components/schemas/Id'}
+        against_snapshot_id: {$ref: '#/components/schemas/Id'}
+        added: {type: array, items: {$ref: '#/components/schemas/Id'}}
+        removed: {type: array, items: {$ref: '#/components/schemas/Id'}}
+        renamed: {type: array, items: {type: object, additionalProperties: true}}
+        protocol_changed: {type: array, items: {type: object, additionalProperties: true}}
+        ambiguous: {type: array, items: {type: object, additionalProperties: true}}
+    NodeSecretView:
+      type: object
+      additionalProperties: false
+      required: [raw_node_id, format, raw, revealed_at]
+      properties:
+        raw_node_id: {$ref: '#/components/schemas/Id'}
+        format: {type: string}
+        raw:
+          oneOf:
+            - {type: object, additionalProperties: true}
+            - {type: string}
+        revealed_at: {$ref: '#/components/schemas/Timestamp'}
+    BulkNodeCheckRequest:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [scope, output_id]
+          properties:
+            scope: {type: string, const: output}
+            output_id: {$ref: '#/components/schemas/Id'}
+        - type: object
+          additionalProperties: false
+          required: [scope, source_id, output_id]
+          properties:
+            scope: {type: string, const: source}
+            source_id: {$ref: '#/components/schemas/Id'}
+            output_id: {$ref: '#/components/schemas/Id'}
+        - type: object
+          additionalProperties: false
+          required: [scope]
+          properties:
+            scope: {type: string, const: all}
+    PolicyCreate:
+      type: object
+      additionalProperties: false
+      required: [display_name, configuration]
+      properties:
+        display_name: {type: string, minLength: 1, maxLength: 200}
+        configuration: {type: object, additionalProperties: true}
+    NameAllocation:
+      type: object
+      additionalProperties: false
+      required: [node_occurrence_id, final_name, suffix_number, locked, active, last_seen_at]
+      properties:
+        node_occurrence_id: {$ref: '#/components/schemas/Id'}
+        final_name: {type: string}
+        suffix_number: {type: integer, minimum: 1}
+        locked: {type: boolean}
+        active: {type: boolean}
+        currently_included: {type: boolean}
+        reserved_until:
+          anyOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]
+        last_seen_at: {$ref: '#/components/schemas/Timestamp'}
+    NameAllocationPage:
+      type: object
+      additionalProperties: false
+      required: [items, page]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/NameAllocation'}}
+        page: {$ref: '#/components/schemas/PageInfo'}
+    NameCompactionPreview:
+      type: object
+      additionalProperties: false
+      required: [preview_id, preview_digest, expires_at, changes]
+      properties:
+        preview_id: {$ref: '#/components/schemas/Id'}
+        preview_digest: {type: string, pattern: '^[0-9a-f]{64}$'}
+        expires_at: {$ref: '#/components/schemas/Timestamp'}
+        changes:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [node_occurrence_id, before, after]
+            properties:
+              node_occurrence_id: {$ref: '#/components/schemas/Id'}
+              before: {type: string}
+              after: {type: string}
+    HealthCapacity:
+      type: object
+      additionalProperties: false
+      required: [active_unique, hard_limit, configured_concurrency, effective_concurrency, observed_mean_ms, observed_p95_ms, estimated_cycle_seconds, desired_cycle_seconds, stale_after_seconds, coverage_ratio, warning]
+      properties:
+        active_unique: {type: integer, minimum: 0, maximum: 100000}
+        hard_limit: {type: integer, const: 100000}
+        configured_concurrency: {type: integer, minimum: 1, maximum: 64}
+        effective_concurrency: {type: integer, minimum: 1, maximum: 64}
+        observed_mean_ms: {type: number, minimum: 0}
+        observed_p95_ms: {type: number, minimum: 0}
+        estimated_cycle_seconds: {type: number, minimum: 0}
+        desired_cycle_seconds: {type: integer, minimum: 60}
+        stale_after_seconds: {type: integer, minimum: 60}
+        coverage_ratio: {type: number, minimum: 0, maximum: 1}
+        warning: {type: string, enum: [none, desired_cycle_exceeded, stale_window_exceeded, queue_full]}
+    ProbeBatch:
+      type: object
+      additionalProperties: false
+      required: [id, output_id, status, control_total, control_failed, completed_unique, eligible_unique, node_failure_unique, window_start, window_end]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        output_id: {$ref: '#/components/schemas/Id'}
+        status: {type: string, enum: [open, closed]}
+        conclusion: {type: [string, 'null'], enum: [normal, mass_failure_suppressed, control_failure_suppressed, insufficient_sample, null]}
+        control_total: {type: integer, minimum: 0}
+        control_failed: {type: integer, minimum: 0}
+        completed_unique: {type: integer, minimum: 0}
+        eligible_unique: {type: integer, minimum: 0}
+        node_failure_unique: {type: integer, minimum: 0}
+        window_start: {$ref: '#/components/schemas/Timestamp'}
+        window_end: {$ref: '#/components/schemas/Timestamp'}
+    ProbeBatchPage:
+      type: object
+      additionalProperties: false
+      required: [items, page]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/ProbeBatch'}}
+        page: {$ref: '#/components/schemas/PageInfo'}
+    AuditEvent:
+      type: object
+      additionalProperties: false
+      required: [id, occurred_at, actor_type, action, result, correlation_id]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        occurred_at: {$ref: '#/components/schemas/Timestamp'}
+        actor_type: {type: string, enum: [administrator, token, system, cli]}
+        action: {type: string}
+        resource_type: {type: [string, 'null']}
+        resource_id:
+          anyOf: [{$ref: '#/components/schemas/Id'}, {type: 'null'}]
+        result: {type: string, enum: [success, failure, denied]}
+        correlation_id: {type: string}
+        detail_code: {type: [string, 'null']}
+    AuditEventPage:
+      type: object
+      additionalProperties: false
+      required: [items, page]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/AuditEvent'}}
+        page: {$ref: '#/components/schemas/PageInfo'}
+    SystemSettings:
+      type: object
+      additionalProperties: false
+      properties:
+        timezone: {type: string}
+        probe_concurrency: {type: integer, minimum: 1, maximum: 64}
+        manual_probe_slots: {type: integer, minimum: 0, maximum: 8}
+        per_server_concurrency: {type: integer, minimum: 1, maximum: 16}
+        per_target_concurrency: {type: integer, minimum: 1, maximum: 32}
+        log_retention_days: {type: integer, minimum: 1, maximum: 3650}
+        audit_retention_days: {type: integer, minimum: 1, maximum: 3650}
+        trusted_proxy_cidrs: {type: array, maxItems: 100, items: {type: string}}
+        cors_allowed_origins: {type: array, maxItems: 100, items: {type: string, format: uri}}
+    Warning:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code: {type: string}
+        message: {type: string}
+        path: {type: [string, 'null']}
+    ImportPreview:
+      type: object
+      additionalProperties: false
+      required: [preview_id, preview_digest, schema_version, expires_at, changes, conflicts, warnings]
+      properties:
+        preview_id: {$ref: '#/components/schemas/Id'}
+        preview_digest: {type: string, pattern: '^[0-9a-f]{64}$'}
+        schema_version: {type: integer, minimum: 1}
+        expires_at: {$ref: '#/components/schemas/Timestamp'}
+        changes: {type: array, items: {type: object, additionalProperties: true}}
+        conflicts: {type: array, items: {type: object, additionalProperties: true}}
+        warnings: {type: array, items: {$ref: '#/components/schemas/Warning'}}
+    BackupRequest:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [encryption_mode, passphrase]
+          properties:
+            encryption_mode: {type: string, const: passphrase}
+            passphrase: {type: string, writeOnly: true, minLength: 12, maxLength: 1024}
+        - type: object
+          additionalProperties: false
+          required: [encryption_mode, recipient_public_key]
+          properties:
+            encryption_mode: {type: string, const: recipient_public_key}
+            recipient_public_key: {type: string, writeOnly: true, maxLength: 8192}
+        - type: object
+          additionalProperties: false
+          required: [encryption_mode]
+          properties:
+            encryption_mode: {type: string, const: redacted}
+    RestorePreview:
+      type: object
+      additionalProperties: false
+      required: [preview_id, preview_digest, compatible, expires_at, source_schema_version, impact, warnings]
+      properties:
+        preview_id: {$ref: '#/components/schemas/Id'}
+        preview_digest: {type: string, pattern: '^[0-9a-f]{64}$'}
+        compatible: {type: boolean}
+        expires_at: {$ref: '#/components/schemas/Timestamp'}
+        source_schema_version: {type: integer, minimum: 1}
+        impact: {type: object, additionalProperties: true}
+        warnings: {type: array, items: {$ref: '#/components/schemas/Warning'}}

@@ -1,0 +1,10 @@
+.git
+.github
+*.db
+*.db-*
+coverage.out
+dist
+tmp
+web/node_modules
+web/*.tsbuildinfo
+web/scripts
