@@ -16,6 +16,11 @@ export interface Source {
   current_snapshot_id: string | null
 	masked_location: string | null
 	masked_proxy: string | null
+	consecutive_failures: number
+	last_refresh_error_code: string | null
+	next_refresh_at: string | null
+	next_retry_at: string | null
+	retry_scheduled: boolean
   configuration?: {
     type: string
     input_format: string
@@ -23,6 +28,8 @@ export interface Source {
     minimum_nodes: number
     maximum_drop_ratio: number
 		refresh_interval_seconds: number
+		retry_count: number
+		stale_after_seconds: number
 		timeout_seconds: number
 		proxy_configured: boolean
     private_network_authorized: boolean

@@ -114,8 +114,10 @@ func Allocate(existing []Allocation, candidates []Candidate, options Options) (R
 			return Result{}, fmt.Errorf("allocation name %q conflicts with %s", allocation.FinalName, owner)
 		}
 		if present {
+			if !allocation.Active {
+				allocation.LastSeenAt = options.Now
+			}
 			allocation.Active = true
-			allocation.LastSeenAt = options.Now
 			allocation.ReservedUntil = time.Time{}
 		} else if allocation.Active {
 			allocation.Active = false

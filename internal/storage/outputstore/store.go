@@ -935,10 +935,14 @@ func (s *Store) Publish(ctx context.Context, request PublishRequest) (Artifact, 
 	defer tx.Rollback()
 	var sequence, minimum, previousCount int
 	var maximum float64
+	var previousAllocationBlobID string
 	if err := tx.QueryRowContext(ctx, `
 SELECT next_build_sequence, minimum_nodes, maximum_drop_ratio,
-       COALESCE((SELECT node_count FROM managed_output_artifacts a WHERE a.id = o.current_artifact_id), 0)
-FROM managed_outputs o WHERE id = ? AND lifecycle_state = 'active'`, request.OutputID).Scan(&sequence, &minimum, &maximum, &previousCount); errors.Is(err, sql.ErrNoRows) {
+       COALESCE((SELECT node_count FROM managed_output_artifacts a WHERE a.id = o.current_artifact_id), 0),
+       COALESCE(allocation_blob_id, '')
+FROM managed_outputs o WHERE id = ? AND lifecycle_state = 'active'`, request.OutputID).Scan(
+		&sequence, &minimum, &maximum, &previousCount, &previousAllocationBlobID,
+	); errors.Is(err, sql.ErrNoRows) {
 		return Artifact{}, ErrNotFound
 	} else if err != nil {
 		return Artifact{}, fmt.Errorf("read managed output publication state: %w", err)
@@ -1001,7 +1005,44 @@ WHERE id = ? AND next_build_sequence = ?`, artifact.ID, request.AllocationBlobID
 	if err := tx.Commit(); err != nil {
 		return Artifact{}, fmt.Errorf("commit managed output publication: %w", err)
 	}
+	if previousAllocationBlobID != "" && previousAllocationBlobID != request.AllocationBlobID {
+		_, _ = s.blobs.DeleteUnreferenced(context.Background(), previousAllocationBlobID)
+	}
 	return artifact, nil
+}
+
+func (s *Store) UpdateAllocation(ctx context.Context, outputID, currentArtifactID, expectedAllocationBlobID, allocationBlobID string) error {
+	if !validID(outputID) || !validID(currentArtifactID) || !validID(allocationBlobID) || expectedAllocationBlobID != "" && !validID(expectedAllocationBlobID) {
+		return fmt.Errorf("invalid managed output allocation update")
+	}
+	tx, err := s.database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin managed output allocation update: %w", err)
+	}
+	defer tx.Rollback()
+	var kind string
+	if err := tx.QueryRowContext(ctx, `SELECT kind FROM encrypted_blobs WHERE id = ?`, allocationBlobID).Scan(&kind); err != nil || kind != "allocation_state" {
+		return ErrConflict
+	}
+	now := s.now().UTC()
+	result, err := tx.ExecContext(ctx, `
+UPDATE managed_outputs
+SET allocation_blob_id = ?, updated_at = ?
+WHERE id = ? AND lifecycle_state = 'active' AND current_artifact_id = ?
+  AND COALESCE(allocation_blob_id, '') = ?`, allocationBlobID, now.UnixMilli(), outputID, currentArtifactID, expectedAllocationBlobID)
+	if err != nil {
+		return fmt.Errorf("update managed output allocation: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return ErrConflict
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit managed output allocation update: %w", err)
+	}
+	if expectedAllocationBlobID != "" && expectedAllocationBlobID != allocationBlobID {
+		_, _ = s.blobs.DeleteUnreferenced(context.Background(), expectedAllocationBlobID)
+	}
+	return nil
 }
 
 func (s *Store) CreateCredential(ctx context.Context, outputID string) (Credential, error) {

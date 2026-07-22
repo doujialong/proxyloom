@@ -24,11 +24,11 @@ func TestMigrateFromEmptyDatabaseAndReplay(t *testing.T) {
 		t.Fatalf("Migrate() replay error = %v", err)
 	}
 	version, err := CurrentVersion(context.Background(), database)
-	if err != nil || version != 10 {
+	if err != nil || version != 12 {
 		t.Fatalf("CurrentVersion() = %d, %v", version, err)
 	}
 	var count int
-	if err := database.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&count); err != nil || count != 10 {
+	if err := database.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&count); err != nil || count != 12 {
 		t.Fatalf("migration count = %d, %v", count, err)
 	}
 	var checksum string
@@ -54,6 +54,35 @@ func TestMigrateFromEmptyDatabaseAndReplay(t *testing.T) {
 			t.Fatalf("table %s count = %d, %v", table, count, err)
 		}
 	}
+	for _, trigger := range []string{
+		"managed_output_artifacts_no_delete", "artifacts_no_delete", "snapshots_no_delete",
+		"raw_documents_no_delete", "raw_nodes_no_delete", "canonical_nodes_no_delete",
+		"snapshot_occurrences_no_delete", "fingerprints_no_delete",
+	} {
+		if err := database.QueryRow("SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?", trigger).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("retired trigger %s count = %d, %v", trigger, count, err)
+		}
+	}
+	for _, index := range []string{
+		"source_revisions_config_blob", "raw_documents_blob", "raw_nodes_raw_blob",
+		"raw_nodes_original_name_blob", "canonical_nodes_canonical_blob", "artifacts_content_blob",
+		"managed_resources_config_blob", "managed_outputs_allocation_blob",
+		"managed_output_artifacts_content_blob", "managed_output_artifacts_manifest_blob",
+		"node_health_states_latest_record",
+	} {
+		if err := database.QueryRow("SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = ?", index).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("retention index %s count = %d, %v", index, count, err)
+		}
+	}
+	for _, trigger := range []string{
+		"managed_output_artifacts_no_update", "artifacts_no_update", "snapshots_no_update",
+		"raw_documents_no_update", "raw_nodes_no_update", "canonical_nodes_no_update",
+		"snapshot_occurrences_no_update", "fingerprints_no_update",
+	} {
+		if err := database.QueryRow("SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?", trigger).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("immutable update trigger %s count = %d, %v", trigger, count, err)
+		}
+	}
 }
 
 func TestEmbeddedUpgradeFromBootstrapRequiresVerifiedBackup(t *testing.T) {
@@ -73,7 +102,7 @@ func TestEmbeddedUpgradeFromBootstrapRequiresVerifiedBackup(t *testing.T) {
 	backupCalls := 0
 	options.BeforeUpgrade = func(_ context.Context, _ *sql.DB, current, target int) error {
 		backupCalls++
-		if current != 1 || target != 10 {
+		if current != 1 || target != 12 {
 			t.Fatalf("backup versions = %d -> %d", current, target)
 		}
 		return nil
@@ -163,7 +192,7 @@ INSERT INTO jobs(
 		Now: func() time.Time { return migrationTime.Add(time.Second) },
 		BeforeUpgrade: func(_ context.Context, _ *sql.DB, current, target int) error {
 			backupCalls++
-			if current != 4 || target != 10 {
+			if current != 4 || target != 12 {
 				t.Fatalf("backup versions = %d -> %d", current, target)
 			}
 			return nil
@@ -271,7 +300,7 @@ func TestCreateVerifiedBackup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVerifiedBackup() error = %v", err)
 	}
-	if info.SchemaVersion != 10 || len(info.SHA256) != 64 || info.Size <= 0 {
+	if info.SchemaVersion != 12 || len(info.SHA256) != 64 || info.Size <= 0 {
 		t.Fatalf("backup info = %+v", info)
 	}
 	fileInfo, err := os.Stat(destination)

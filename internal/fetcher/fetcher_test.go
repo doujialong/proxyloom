@@ -63,6 +63,22 @@ func TestValidateURLRejectsUnsafeSchemesAndPorts(t *testing.T) {
 	}
 }
 
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	if delay := parseRetryAfter("120", now); delay != 2*time.Minute {
+		t.Fatalf("numeric Retry-After = %s", delay)
+	}
+	date := now.Add(7 * time.Minute).Format(http.TimeFormat)
+	if delay := parseRetryAfter(date, now); delay != 7*time.Minute {
+		t.Fatalf("date Retry-After = %s", delay)
+	}
+	for _, value := range []string{"", "invalid", "-1", now.Add(-time.Minute).Format(http.TimeFormat)} {
+		if delay := parseRetryAfter(value, now); delay != 0 {
+			t.Fatalf("parseRetryAfter(%q) = %s", value, delay)
+		}
+	}
+}
+
 func TestValidateProxyURL(t *testing.T) {
 	for _, value := range []string{
 		"http://proxy.example", "https://user:secret@proxy.example:8443",

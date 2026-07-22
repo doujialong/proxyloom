@@ -1,7 +1,10 @@
 package app
 
 import (
+	"errors"
+	"net/http"
 	"testing"
+	"time"
 
 	"github.com/doujialong/proxyloom/internal/storage/sourcestore"
 )
@@ -45,5 +48,41 @@ func TestNormalizeConfigDefaultsRemoteTimeout(t *testing.T) {
 	inline := normalizeConfig(SourceConfig{Type: sourcestore.SourceInline})
 	if inline.TimeoutSeconds != 0 {
 		t.Fatalf("inline timeout = %d, want 0", inline.TimeoutSeconds)
+	}
+	if config.RetryCount != DefaultSourceRetryCount || config.StaleAfterSeconds != DefaultSourceStaleAfterSeconds {
+		t.Fatalf("source reliability defaults = retries %d stale %d", config.RetryCount, config.StaleAfterSeconds)
+	}
+	disabled := normalizeConfig(SourceConfig{RetryCount: 0, RetryCountSet: true})
+	if disabled.RetryCount != 0 {
+		t.Fatalf("explicit zero retry count = %d", disabled.RetryCount)
+	}
+}
+
+func TestSourceRetryDelayUsesIncreasingJitteredBackoff(t *testing.T) {
+	bases := []time.Duration{time.Minute, 3 * time.Minute, 10 * time.Minute, 30 * time.Minute, time.Hour}
+	for failures, base := range bases {
+		delay := sourceRetryDelay("00000000-0000-4000-8000-000000000001", failures+1, 0)
+		if delay < base*8/10 || delay > base*12/10 {
+			t.Fatalf("failure %d delay = %s, base %s", failures+1, delay, base)
+		}
+	}
+	authDelay := sourceRetryDelay("00000000-0000-4000-8000-000000000001", 1, http.StatusUnauthorized)
+	if authDelay < 8*time.Minute {
+		t.Fatalf("authentication retry delay = %s", authDelay)
+	}
+}
+
+func TestRetryableRefreshFailureClassification(t *testing.T) {
+	if retryableRefreshFailure(&OperationError{Code: "fetch_failed", Err: errors.New("gone"), HTTPStatus: http.StatusGone}) {
+		t.Fatal("HTTP 410 was treated as immediately retryable")
+	}
+	if retryableRefreshFailure(&OperationError{Code: "config_invalid", Err: errors.New("invalid")}) {
+		t.Fatal("invalid config was treated as retryable")
+	}
+	if !retryableRefreshFailure(&OperationError{Code: "fetch_failed", Err: errors.New("temporary"), HTTPStatus: http.StatusServiceUnavailable}) {
+		t.Fatal("HTTP 503 was not treated as retryable")
+	}
+	if staleDuration(DefaultSourceStaleAfterSeconds) != 72*time.Hour {
+		t.Fatalf("default stale duration = %s", staleDuration(DefaultSourceStaleAfterSeconds))
 	}
 }

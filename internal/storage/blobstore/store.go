@@ -65,6 +65,23 @@ type Record struct {
 	CreatedAt     time.Time
 }
 
+type GarbageStats struct {
+	Marked       int64
+	Unmarked     int64
+	Deleted      int
+	DeletedBytes int64
+}
+
+const durableReferencePredicate = `
+  EXISTS (SELECT 1 FROM source_revisions WHERE config_blob_id = encrypted_blobs.id)
+  OR EXISTS (SELECT 1 FROM raw_documents WHERE blob_id = encrypted_blobs.id)
+  OR EXISTS (SELECT 1 FROM raw_nodes WHERE raw_blob_id = encrypted_blobs.id OR original_name_blob_id = encrypted_blobs.id)
+  OR EXISTS (SELECT 1 FROM canonical_nodes WHERE canonical_blob_id = encrypted_blobs.id)
+  OR EXISTS (SELECT 1 FROM artifacts WHERE content_blob_id = encrypted_blobs.id)
+  OR EXISTS (SELECT 1 FROM managed_resources WHERE config_blob_id = encrypted_blobs.id)
+  OR EXISTS (SELECT 1 FROM managed_outputs WHERE allocation_blob_id = encrypted_blobs.id)
+  OR EXISTS (SELECT 1 FROM managed_output_artifacts WHERE content_blob_id = encrypted_blobs.id OR manifest_blob_id = encrypted_blobs.id)`
+
 func New(database *sql.DB, keys *keyring.Ring, options Options) (*Store, error) {
 	if database == nil {
 		return nil, fmt.Errorf("database is required")
@@ -301,6 +318,28 @@ FROM encrypted_blobs WHERE id = ?`, id).Scan(
 	return plaintext, record, nil
 }
 
+// ContentMatches compares plaintext with a stored blob without decrypting or
+// loading an external ciphertext file.
+func (s *Store) ContentMatches(ctx context.Context, id, kind string, plaintext []byte) (bool, error) {
+	if s == nil || s.database == nil || s.keys == nil || !validID(id) || !validKind(kind) {
+		return false, ErrNotFound
+	}
+	contentKey, err := s.keys.Active(keyring.PurposeContent)
+	if err != nil {
+		return false, err
+	}
+	want := sumContentHMAC(contentKey.Material, kind, plaintext)
+	var storedKind string
+	var stored []byte
+	if err := s.database.QueryRowContext(ctx, `
+SELECT kind, content_hmac FROM encrypted_blobs WHERE id = ?`, id).Scan(&storedKind, &stored); errors.Is(err, sql.ErrNoRows) {
+		return false, ErrNotFound
+	} else if err != nil {
+		return false, fmt.Errorf("read blob content digest: %w", err)
+	}
+	return storedKind == kind && len(stored) == sha256.Size && subtle.ConstantTimeCompare(stored, want) == 1, nil
+}
+
 // DeleteUnreferenced removes a Blob only when no durable record points at it.
 // Foreign-key ownership stays authoritative; callers cannot delete live data.
 func (s *Store) DeleteUnreferenced(ctx context.Context, id string) (bool, error) {
@@ -351,6 +390,106 @@ WHERE id = ?
 		_ = syncDirectory(filepath.Dir(path))
 	}
 	return true, nil
+}
+
+// ReconcileGarbage marks currently unreferenced blobs for a later sweep and
+// clears marks from blobs that became referenced before the grace period ended.
+func (s *Store) ReconcileGarbage(ctx context.Context, deleteAfter time.Time) (GarbageStats, error) {
+	if s == nil || s.database == nil || deleteAfter.IsZero() {
+		return GarbageStats{}, fmt.Errorf("blob store and garbage deadline are required")
+	}
+	tx, err := s.database.BeginTx(ctx, nil)
+	if err != nil {
+		return GarbageStats{}, fmt.Errorf("begin blob garbage reconciliation: %w", err)
+	}
+	defer tx.Rollback()
+	unmarked, err := tx.ExecContext(ctx, `
+UPDATE encrypted_blobs SET delete_after = NULL
+WHERE delete_after IS NOT NULL AND (`+durableReferencePredicate+`)`)
+	if err != nil {
+		return GarbageStats{}, fmt.Errorf("unmark referenced blobs: %w", err)
+	}
+	marked, err := tx.ExecContext(ctx, `
+UPDATE encrypted_blobs SET delete_after = ?
+WHERE delete_after IS NULL AND NOT (`+durableReferencePredicate+`)`, deleteAfter.UTC().UnixMilli())
+	if err != nil {
+		return GarbageStats{}, fmt.Errorf("mark unreferenced blobs: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return GarbageStats{}, fmt.Errorf("commit blob garbage reconciliation: %w", err)
+	}
+	markedCount, _ := marked.RowsAffected()
+	unmarkedCount, _ := unmarked.RowsAffected()
+	return GarbageStats{Marked: markedCount, Unmarked: unmarkedCount}, nil
+}
+
+// SweepGarbage removes a bounded batch after a second authoritative reference
+// check. Database deletion is one transaction and each changed directory is
+// synced once after commit.
+func (s *Store) SweepGarbage(ctx context.Context, before time.Time, limit int) (GarbageStats, error) {
+	if s == nil || s.database == nil || before.IsZero() || limit < 1 || limit > 10000 {
+		return GarbageStats{}, fmt.Errorf("blob store, sweep deadline, and limit between 1 and 10000 are required")
+	}
+	tx, err := s.database.BeginTx(ctx, nil)
+	if err != nil {
+		return GarbageStats{}, fmt.Errorf("begin marked blob sweep: %w", err)
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `
+DELETE FROM encrypted_blobs
+WHERE id IN (
+  SELECT id FROM encrypted_blobs
+  WHERE delete_after IS NOT NULL AND delete_after <= ?
+  ORDER BY delete_after, id LIMIT ?
+)
+AND NOT (`+durableReferencePredicate+`)
+RETURNING id, ciphertext_size, relative_path`, before.UTC().UnixMilli(), limit)
+	if err != nil {
+		return GarbageStats{}, fmt.Errorf("delete marked blob batch: %w", err)
+	}
+	type candidate struct {
+		id           string
+		size         int64
+		relativePath sql.NullString
+	}
+	deleted := make([]candidate, 0, limit)
+	for rows.Next() {
+		var item candidate
+		if err := rows.Scan(&item.id, &item.size, &item.relativePath); err != nil {
+			rows.Close()
+			return GarbageStats{}, fmt.Errorf("scan deleted blob: %w", err)
+		}
+		deleted = append(deleted, item)
+	}
+	if err := rows.Close(); err != nil {
+		return GarbageStats{}, fmt.Errorf("close deleted blob rows: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return GarbageStats{}, fmt.Errorf("commit marked blob sweep: %w", err)
+	}
+	stats := GarbageStats{Deleted: len(deleted)}
+	touchedDirectories := make(map[string]struct{})
+	var removalErr error
+	for _, item := range deleted {
+		stats.DeletedBytes += item.size
+		if !item.relativePath.Valid {
+			continue
+		}
+		path := filepath.Join(s.root, filepath.FromSlash(item.relativePath.String))
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if removalErr == nil {
+				removalErr = fmt.Errorf("remove swept external blob %s: %w", item.id, err)
+			}
+			continue
+		}
+		touchedDirectories[filepath.Dir(path)] = struct{}{}
+	}
+	for directory := range touchedDirectories {
+		if err := syncDirectory(directory); err != nil && removalErr == nil {
+			removalErr = fmt.Errorf("sync swept blob directory: %w", err)
+		}
+	}
+	return stats, removalErr
 }
 
 func (s *Store) ReencryptBlobKeyBatch(ctx context.Context, oldKeyIDs []string, limit int) (int, error) {

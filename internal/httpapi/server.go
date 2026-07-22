@@ -137,6 +137,8 @@ type createSourceRequest struct {
 	MinimumNodes             int               `json:"minimum_nodes,omitempty"`
 	MaximumDropRatio         *float64          `json:"maximum_drop_ratio,omitempty"`
 	RefreshIntervalSeconds   int               `json:"refresh_interval_seconds,omitempty"`
+	RetryCount               *int              `json:"retry_count,omitempty"`
+	StaleAfterSeconds        int               `json:"stale_after_seconds,omitempty"`
 	PrivateNetworkAuthorized bool              `json:"private_network_authorized,omitempty"`
 	MaxResponseBytes         int               `json:"max_response_bytes,omitempty"`
 	HealthFilterEnabled      bool              `json:"health_filter_enabled,omitempty"`
@@ -147,16 +149,22 @@ func sourceConfigFromRequest(input createSourceRequest) app.SourceConfig {
 	if input.MaximumDropRatio != nil {
 		maximumDropRatio = *input.MaximumDropRatio
 	}
-	return app.SourceConfig{
+	config := app.SourceConfig{
 		Type: sourcestore.SourceType(input.Type), InlineContent: input.Content, URL: input.URL,
 		RequestHeaders: input.Headers, ProxyURL: input.ProxyURL, TimeoutSeconds: input.TimeoutSeconds,
 		InputFormat: input.InputFormat, OutputFormat: input.OutputFormat,
 		MinimumNodes: input.MinimumNodes, MaximumDropRatio: maximumDropRatio,
 		RefreshIntervalSeconds:   input.RefreshIntervalSeconds,
+		StaleAfterSeconds:        input.StaleAfterSeconds,
 		PrivateNetworkAuthorized: input.PrivateNetworkAuthorized,
 		MaxResponseBytes:         input.MaxResponseBytes,
 		HealthFilterEnabled:      input.HealthFilterEnabled,
 	}
+	if input.RetryCount != nil {
+		config.RetryCount = *input.RetryCount
+		config.RetryCountSet = true
+	}
+	return config
 }
 
 func applySourceMergePatch(body io.Reader, displayName string, config app.SourceConfig) (string, app.SourceConfig, error) {
@@ -210,6 +218,11 @@ func applySourceMergePatch(body io.Reader, displayName string, config app.Source
 			}
 		case "refresh_interval_seconds":
 			err = patchNumber(raw, &config.RefreshIntervalSeconds)
+		case "retry_count":
+			err = patchNumber(raw, &config.RetryCount)
+			config.RetryCountSet = true
+		case "stale_after_seconds":
+			err = patchNumber(raw, &config.StaleAfterSeconds)
 		case "private_network_authorized":
 			err = patchBool(raw, &config.PrivateNetworkAuthorized)
 		case "max_response_bytes":
@@ -414,13 +427,19 @@ func (s *Server) job(response http.ResponseWriter, request *http.Request) {
 		writeJSON(response, http.StatusOK, managedBuildJobView(outputJob))
 		return
 	}
-	writeJSON(response, http.StatusOK, map[string]interface{}{
+	view := map[string]interface{}{
 		"id": job.ID, "source_id": job.SourceID, "source_revision_id": job.SourceRevisionID,
 		"status": job.Status, "attempt": job.Attempt, "max_attempts": job.MaxAttempts,
 		"error_code": nullable(job.ErrorCode), "error_detail": nullable(job.ErrorDetail),
 		"due_at": job.DueAt, "created_at": job.CreatedAt,
 		"started_at": job.StartedAt, "finished_at": job.FinishedAt,
-	})
+		"retry_scheduled": false, "next_retry_at": nil,
+	}
+	if active, exists, activeErr := s.jobs.ActiveForSource(request.Context(), job.SourceID, job.SourceRevisionID); activeErr == nil && exists && strings.HasPrefix(active.CorrelationID, "retry-") {
+		view["retry_scheduled"] = true
+		view["next_retry_at"] = active.DueAt.UTC().Format(time.RFC3339Nano)
+	}
+	writeJSON(response, http.StatusOK, view)
 }
 
 func (s *Server) subscription(response http.ResponseWriter, request *http.Request) {

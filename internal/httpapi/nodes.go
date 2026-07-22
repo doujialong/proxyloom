@@ -37,7 +37,8 @@ func (s *Server) nodes(response http.ResponseWriter, request *http.Request) {
 	protocolID := request.URL.Query().Get("protocol")
 	health := request.URL.Query().Get("health")
 	options := healthstore.NodeListOptions{
-		SourceID: sourceID, ProtocolID: protocolID, State: healthstore.State(health), Limit: limit,
+		SourceID: sourceID, ProtocolID: protocolID, State: healthstore.State(health),
+		PresentOnly: true, Limit: limit,
 	}
 	if encoded := request.URL.Query().Get("cursor"); encoded != "" {
 		cursor, err := decodeNodeCursor(encoded)

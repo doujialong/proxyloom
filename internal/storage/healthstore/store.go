@@ -118,6 +118,7 @@ type NodeListOptions struct {
 	SourceID         string
 	ProtocolID       string
 	State            State
+	PresentOnly      bool
 	BeforeLastSeenAt *time.Time
 	BeforeID         string
 	Limit            int
@@ -279,6 +280,17 @@ WHERE node_occurrence_id = ?`, now.UnixMilli(), now.UnixMilli(), now.UnixMilli()
 				return fmt.Errorf("refresh node health queue: %w", err)
 			}
 		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE probe_queue_items
+SET status = 'dormant', due_at = NULL, lease_owner = NULL,
+    lease_expires_at = NULL, updated_at = ?
+WHERE status IN ('dormant', 'queued')
+  AND node_occurrence_id IN (
+    SELECT id FROM node_occurrences
+    WHERE source_id = ? AND lifecycle_state <> 'present'
+  )`, now.UnixMilli(), sourceID); err != nil {
+		return fmt.Errorf("deactivate absent node health checks: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit health snapshot synchronization: %w", err)
@@ -532,6 +544,9 @@ WHERE 1 = 1`
 		query += ` AND COALESCE(h.state, 'unchecked') = ?`
 		arguments = append(arguments, string(options.State))
 	}
+	if options.PresentOnly {
+		query += ` AND o.lifecycle_state = 'present'`
+	}
 	if options.BeforeLastSeenAt != nil {
 		query += ` AND (o.last_seen_at < ? OR (o.last_seen_at = ? AND o.id < ?))`
 		millis := options.BeforeLastSeenAt.UTC().UnixMilli()
@@ -638,7 +653,9 @@ SELECT count(*),
        COALESCE(sum(CASE WHEN status = 'queued' THEN 1 ELSE 0 END), 0),
        COALESCE(sum(CASE WHEN status IN ('leased', 'running') THEN 1 ELSE 0 END), 0),
        COALESCE(sum(CASE WHEN status = 'dormant' THEN 1 ELSE 0 END), 0)
-FROM probe_queue_items`).Scan(&capacity.Total, &capacity.Queued, &capacity.Running, &capacity.Dormant)
+FROM probe_queue_items queue
+JOIN node_occurrences occurrence ON occurrence.id = queue.node_occurrence_id
+WHERE occurrence.lifecycle_state = 'present'`).Scan(&capacity.Total, &capacity.Queued, &capacity.Running, &capacity.Dormant)
 	if err != nil {
 		return Capacity{}, fmt.Errorf("read health queue capacity: %w", err)
 	}

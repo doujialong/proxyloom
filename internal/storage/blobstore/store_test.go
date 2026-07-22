@@ -267,6 +267,101 @@ END`); err != nil {
 	}
 }
 
+func TestGarbageCollectionUsesGraceAndRechecksReferences(t *testing.T) {
+	store, database, ring := testStore(t, 8)
+	defer database.Close()
+	defer ring.Close()
+	orphan, err := store.Put(context.Background(), PutRequest{
+		Kind: "allocation_state", Plaintext: bytes.Repeat([]byte("orphan"), 32),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	referenced, err := store.Put(context.Background(), PutRequest{
+		Kind: "collection_config", Plaintext: bytes.Repeat([]byte("live"), 32),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`
+INSERT INTO managed_resources(
+  id, resource_type, display_name, config_blob_id, revision_number,
+  lifecycle_state, created_at, updated_at
+) VALUES ('00000000-0000-4000-8000-000000009901', 'collection', 'live', ?, 1, 'active', ?, ?)`,
+		referenced.ID, testTime.UnixMilli(), testTime.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	deadline := testTime.Add(5 * time.Minute)
+	stats, err := store.ReconcileGarbage(context.Background(), deadline)
+	if err != nil || stats.Marked != 1 || stats.Unmarked != 0 {
+		t.Fatalf("ReconcileGarbage() = %+v, %v", stats, err)
+	}
+	var marked sql.NullInt64
+	if err := database.QueryRow("SELECT delete_after FROM encrypted_blobs WHERE id = ?", orphan.ID).Scan(&marked); err != nil || !marked.Valid || marked.Int64 != deadline.UnixMilli() {
+		t.Fatalf("orphan delete_after = %+v, %v", marked, err)
+	}
+	if err := database.QueryRow("SELECT delete_after FROM encrypted_blobs WHERE id = ?", referenced.ID).Scan(&marked); err != nil || marked.Valid {
+		t.Fatalf("referenced delete_after = %+v, %v", marked, err)
+	}
+	if stats, err := store.SweepGarbage(context.Background(), deadline.Add(-time.Second), 10); err != nil || stats.Deleted != 0 {
+		t.Fatalf("early SweepGarbage() = %+v, %v", stats, err)
+	}
+	var relativePath string
+	if err := database.QueryRow("SELECT relative_path FROM encrypted_blobs WHERE id = ?", orphan.ID).Scan(&relativePath); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(store.root, filepath.FromSlash(relativePath))
+	stats, err = store.SweepGarbage(context.Background(), deadline, 10)
+	if err != nil || stats.Deleted != 1 || stats.DeletedBytes <= 0 {
+		t.Fatalf("SweepGarbage() = %+v, %v", stats, err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("orphan external file remains: %v", err)
+	}
+	if _, _, err := store.Get(context.Background(), referenced.ID); err != nil {
+		t.Fatalf("referenced blob was removed: %v", err)
+	}
+}
+
+func TestContentMatchesAndGarbageSweepIsBounded(t *testing.T) {
+	store, database, ring := testStore(t, 8)
+	defer database.Close()
+	defer ring.Close()
+	content := bytes.Repeat([]byte("same"), 32)
+	first, err := store.Put(context.Background(), PutRequest{Kind: "raw_document", Plaintext: content})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matches, err := store.ContentMatches(context.Background(), first.ID, "raw_document", content); err != nil || !matches {
+		t.Fatalf("ContentMatches(same) = %v, %v", matches, err)
+	}
+	if matches, err := store.ContentMatches(context.Background(), first.ID, "raw_document", []byte("different")); err != nil || matches {
+		t.Fatalf("ContentMatches(different) = %v, %v", matches, err)
+	}
+	if matches, err := store.ContentMatches(context.Background(), first.ID, "artifact", content); err != nil || matches {
+		t.Fatalf("ContentMatches(kind) = %v, %v", matches, err)
+	}
+	for index := 0; index < 2; index++ {
+		if _, err := store.Put(context.Background(), PutRequest{
+			Kind: "raw_document", Plaintext: bytes.Repeat([]byte{byte(index + 1)}, 128),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadline := testTime.Add(5 * time.Minute)
+	if stats, err := store.ReconcileGarbage(context.Background(), deadline); err != nil || stats.Marked != 3 {
+		t.Fatalf("ReconcileGarbage() = %+v, %v", stats, err)
+	}
+	stats, err := store.SweepGarbage(context.Background(), deadline, 2)
+	if err != nil || stats.Deleted != 2 {
+		t.Fatalf("bounded SweepGarbage() = %+v, %v", stats, err)
+	}
+	var remaining int
+	if err := database.QueryRow(`SELECT count(*) FROM encrypted_blobs`).Scan(&remaining); err != nil || remaining != 1 {
+		t.Fatalf("remaining blobs = %d, %v", remaining, err)
+	}
+}
+
 func TestNewRejectsInsecureRootAndPutLimits(t *testing.T) {
 	database, ring := testDatabaseAndKeys(t)
 	defer database.Close()

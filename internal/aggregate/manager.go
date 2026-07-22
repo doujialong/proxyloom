@@ -1,7 +1,9 @@
 package aggregate
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -51,6 +53,21 @@ type Manager struct {
 type BuildResult struct {
 	Artifact outputstore.Artifact
 	Content  []byte
+	Changed  bool
+}
+
+type buildManifest struct {
+	Version               string   `json:"version"`
+	OutputID              string   `json:"output_id"`
+	TargetProfile         string   `json:"target_profile"`
+	ValidatorVersion      string   `json:"validator_version"`
+	CollectionID          string   `json:"collection_id"`
+	PipelineID            string   `json:"pipeline_id"`
+	TemplateID            string   `json:"template_id"`
+	TemplateRevision      int      `json:"template_revision"`
+	IncludedOccurrenceIDs []string `json:"included_occurrence_ids"`
+	ExcludedCount         int      `json:"excluded_count"`
+	BuiltAt               string   `json:"built_at"`
 }
 
 type candidate struct {
@@ -454,22 +471,64 @@ func (m *Manager) Build(ctx context.Context, outputID string) (BuildResult, erro
 	if err != nil {
 		return BuildResult{}, err
 	}
-	manifestContent, err := json.Marshal(map[string]interface{}{
-		"version": BuilderVersion, "output_id": output.ID, "target_profile": output.TargetProfile,
-		"validator_version": validatorVersion,
-		"collection_id":     output.CollectionID, "pipeline_id": output.PipelineID,
-		"template_id": output.TemplateID, "template_revision": templateRevision,
-		"included_occurrence_ids": includedIDs,
-		"excluded_count":          excluded, "built_at": m.now().UTC().Format(time.RFC3339Nano),
-	})
+	manifest := buildManifest{
+		Version: BuilderVersion, OutputID: output.ID, TargetProfile: output.TargetProfile,
+		ValidatorVersion: validatorVersion, CollectionID: output.CollectionID,
+		PipelineID: output.PipelineID, TemplateID: output.TemplateID,
+		TemplateRevision: templateRevision, IncludedOccurrenceIDs: includedIDs,
+		ExcludedCount: excluded, BuiltAt: m.now().UTC().Format(time.RFC3339Nano),
+	}
+	manifestContent, err := json.Marshal(manifest)
 	if err != nil {
 		return BuildResult{}, err
 	}
-	contentBlob, err := m.store.PutBlob(ctx, "output_artifact", content, true)
-	if err != nil {
-		return BuildResult{}, err
+	var currentArtifact outputstore.Artifact
+	contentSame, manifestSame, allocationSame, metadataSame := false, false, false, false
+	if output.CurrentArtifactID != "" {
+		currentArtifact, err = m.store.Artifact(ctx, output.CurrentArtifactID)
+		if err != nil {
+			return BuildResult{}, err
+		}
+		digest := sha256.Sum256(content)
+		contentSame = currentArtifact.ContentLength == len(content) && currentArtifact.PublicSHA256 == fmt.Sprintf("%x", digest)
+		metadataSame = currentArtifact.ContentType == "application/json" && currentArtifact.NodeCount == len(outbounds) &&
+			currentArtifact.ExcludedCount == excluded && currentArtifact.WarningCount == 0 &&
+			currentArtifact.TargetProfile == output.TargetProfile && currentArtifact.ValidatorVersion == validatorVersion
+		currentManifest, record, readErr := m.store.Blob(ctx, currentArtifact.ManifestBlobID)
+		if readErr != nil {
+			return BuildResult{}, readErr
+		}
+		manifestSame = record.Kind == "build_manifest" && equivalentBuildManifest(currentManifest, manifest)
 	}
-	pendingBlobIDs := []string{contentBlob.ID}
+	if output.AllocationBlobID != "" {
+		currentAllocation, record, readErr := m.store.Blob(ctx, output.AllocationBlobID)
+		if readErr != nil {
+			return BuildResult{}, readErr
+		}
+		allocationSame = record.Kind == "allocation_state" && bytes.Equal(currentAllocation, allocationContent)
+	}
+	if contentSame && manifestSame && metadataSame {
+		latest, latestErr := m.store.Output(ctx, output.ID)
+		if latestErr != nil {
+			return BuildResult{}, latestErr
+		}
+		if latest.CurrentArtifactID != output.CurrentArtifactID || latest.AllocationBlobID != output.AllocationBlobID || !latest.UpdatedAt.Equal(output.UpdatedAt) {
+			return BuildResult{}, outputstore.ErrConflict
+		}
+		if allocationSame {
+			return BuildResult{Artifact: currentArtifact, Content: content, Changed: false}, nil
+		}
+		allocationBlob, putErr := m.store.PutBlob(ctx, "allocation_state", allocationContent, false)
+		if putErr != nil {
+			return BuildResult{}, putErr
+		}
+		if updateErr := m.store.UpdateAllocation(ctx, output.ID, output.CurrentArtifactID, output.AllocationBlobID, allocationBlob.ID); updateErr != nil {
+			_ = m.store.DiscardBlob(context.Background(), allocationBlob.ID)
+			return BuildResult{}, updateErr
+		}
+		return BuildResult{Artifact: currentArtifact, Content: content, Changed: false}, nil
+	}
+	pendingBlobIDs := make([]string, 0, 3)
 	published := false
 	defer func() {
 		if published {
@@ -479,19 +538,36 @@ func (m *Manager) Build(ctx context.Context, outputID string) (BuildResult, erro
 			_ = m.store.DiscardBlob(context.Background(), id)
 		}
 	}()
-	manifestBlob, err := m.store.PutBlob(ctx, "build_manifest", manifestContent, false)
-	if err != nil {
-		return BuildResult{}, err
+	contentBlobID := currentArtifact.ContentBlobID
+	if !contentSame {
+		contentBlob, putErr := m.store.PutBlob(ctx, "output_artifact", content, true)
+		if putErr != nil {
+			return BuildResult{}, putErr
+		}
+		contentBlobID = contentBlob.ID
+		pendingBlobIDs = append(pendingBlobIDs, contentBlob.ID)
 	}
-	pendingBlobIDs = append(pendingBlobIDs, manifestBlob.ID)
-	allocationBlob, err := m.store.PutBlob(ctx, "allocation_state", allocationContent, false)
-	if err != nil {
-		return BuildResult{}, err
+	manifestBlobID := currentArtifact.ManifestBlobID
+	if !manifestSame {
+		manifestBlob, putErr := m.store.PutBlob(ctx, "build_manifest", manifestContent, false)
+		if putErr != nil {
+			return BuildResult{}, putErr
+		}
+		manifestBlobID = manifestBlob.ID
+		pendingBlobIDs = append(pendingBlobIDs, manifestBlob.ID)
 	}
-	pendingBlobIDs = append(pendingBlobIDs, allocationBlob.ID)
+	allocationBlobID := output.AllocationBlobID
+	if !allocationSame {
+		allocationBlob, putErr := m.store.PutBlob(ctx, "allocation_state", allocationContent, false)
+		if putErr != nil {
+			return BuildResult{}, putErr
+		}
+		allocationBlobID = allocationBlob.ID
+		pendingBlobIDs = append(pendingBlobIDs, allocationBlob.ID)
+	}
 	artifact, err := m.store.Publish(ctx, outputstore.PublishRequest{
-		OutputID: output.ID, ContentBlobID: contentBlob.ID, ManifestBlobID: manifestBlob.ID,
-		AllocationBlobID: allocationBlob.ID, ContentType: "application/json",
+		OutputID: output.ID, ContentBlobID: contentBlobID, ManifestBlobID: manifestBlobID,
+		AllocationBlobID: allocationBlobID, ContentType: "application/json",
 		NodeCount: len(outbounds), ExcludedCount: excluded, TargetProfile: output.TargetProfile,
 		ValidatorVersion: validatorVersion,
 	})
@@ -499,7 +575,29 @@ func (m *Manager) Build(ctx context.Context, outputID string) (BuildResult, erro
 		return BuildResult{}, err
 	}
 	published = true
-	return BuildResult{Artifact: artifact, Content: content}, nil
+	return BuildResult{Artifact: artifact, Content: content, Changed: true}, nil
+}
+
+func equivalentBuildManifest(content []byte, want buildManifest) bool {
+	var current buildManifest
+	if json.Unmarshal(content, &current) != nil {
+		return false
+	}
+	current.BuiltAt = ""
+	want.BuiltAt = ""
+	if current.Version != want.Version || current.OutputID != want.OutputID ||
+		current.TargetProfile != want.TargetProfile || current.ValidatorVersion != want.ValidatorVersion ||
+		current.CollectionID != want.CollectionID || current.PipelineID != want.PipelineID ||
+		current.TemplateID != want.TemplateID || current.TemplateRevision != want.TemplateRevision ||
+		current.ExcludedCount != want.ExcludedCount || len(current.IncludedOccurrenceIDs) != len(want.IncludedOccurrenceIDs) {
+		return false
+	}
+	for index := range current.IncludedOccurrenceIDs {
+		if current.IncludedOccurrenceIDs[index] != want.IncludedOccurrenceIDs[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func (m *Manager) templateReservedNames(ctx context.Context, output outputstore.Output) ([]string, error) {

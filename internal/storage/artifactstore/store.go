@@ -224,6 +224,26 @@ WHERE p.source_id = ?`, sourceID))
 	return artifact, nil
 }
 
+func (s *Store) Current(ctx context.Context, sourceID string) (Artifact, error) {
+	if !validID(sourceID) {
+		return Artifact{}, ErrNotFound
+	}
+	artifact, err := scanArtifact(s.database.QueryRowContext(ctx, `
+SELECT a.id, a.source_id, a.snapshot_id, a.build_sequence, a.content_blob_id,
+       a.content_type, a.content_length, a.public_sha256, a.node_count,
+       a.warning_count, a.output_format, a.builder_version, a.created_at
+FROM source_publications p
+JOIN artifacts a ON a.id = p.current_artifact_id AND a.source_id = p.source_id
+WHERE p.source_id = ?`, sourceID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Artifact{}, ErrNotFound
+	}
+	if err != nil {
+		return Artifact{}, fmt.Errorf("read current artifact: %w", err)
+	}
+	return artifact, nil
+}
+
 func (s *Store) Content(ctx context.Context, artifact Artifact) ([]byte, error) {
 	content, record, err := s.blobs.Get(ctx, artifact.ContentBlobID)
 	if err != nil {

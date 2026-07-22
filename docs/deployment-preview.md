@@ -202,6 +202,14 @@ curl -fsS -X POST "http://127.0.0.1:8080/api/v1/templates/TEMPLATE_ID/refresh" \
 - HTTP 管理页面只应绑定 loopback 或可信测试网；跨不可信网络必须先配置 HTTPS 反向代理，并按实际部署启用 Secure Cookie。
 - `master.key` 与数据卷必须分开备份；丢失任一方都无法恢复加密数据。
 
+### 5.1 数据保留与空间回收
+
+- 同一 Source 修订返回逐字节相同内容时复用当前 Snapshot；输出内容、构建清单和名称分配均未变化时复用当前 Artifact，不写重复 Blob，也不触发关联 Output 重建。
+- 后台清理每 5 分钟运行一次；默认每源保留 30 个且最多 30 天的 Snapshot、每 Output 保留 30 个 Artifact、每来源或输出保留 100 个已结束任务，原始健康记录保留 30 天。
+- 单轮最多清理 5000 条一般历史、200 个 Snapshot 和 2000 个待删 Blob。Blob 在宽限期结束后再次检查全部持久引用，并在一个事务中批量删除；外部文件按目录合并同步。
+- schema 升级前仍创建并校验完整 SQLite 备份。`migration-backups` 只自动处理 `schema-v*.db` 文件：最新一份最多保留 7 天，其余旧迁移备份在清理周期删除；托管备份和其他用户文件不受影响。
+- 回收业务记录和 Blob 后会尝试截断 WAL。SQLite 主文件的空闲页需要在大批逻辑清理完成后离线 `VACUUM`，不要在日常清理周期反复执行全库压缩。
+
 ## 6. 已验证环境
 
 2026-07-18 早期 M2 预览曾在飞牛 fnOS、Docker Engine 28.5.2、Compose v2.40.3、`linux/amd64` 上完成非 root 启动、健康检查、9 个来源迁移、254 个节点发布和容器重启恢复；一个私有 sing-box 来源的 Artifact 在 Momo 设备实际内核上通过静态校验与隔离 HTTP 204 测试。

@@ -4,27 +4,31 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/doujialong/proxyloom/internal/storage/jobstore"
+	"github.com/doujialong/proxyloom/internal/storage/sourcestore"
 )
 
 type WorkerOptions struct {
-	Owner            string
-	Lease            time.Duration
-	PollInterval     time.Duration
-	Log              func(string, ...interface{})
-	OnRefreshSuccess func(context.Context, string) error
+	Owner               string
+	Lease               time.Duration
+	PollInterval        time.Duration
+	MaintenanceInterval time.Duration
+	Log                 func(string, ...interface{})
+	OnRefreshSuccess    func(context.Context, string) error
 }
 
 type Worker struct {
-	manager          *Manager
-	jobs             *jobstore.Store
-	owner            string
-	lease            time.Duration
-	pollInterval     time.Duration
-	log              func(string, ...interface{})
-	onRefreshSuccess func(context.Context, string) error
+	manager             *Manager
+	jobs                *jobstore.Store
+	owner               string
+	lease               time.Duration
+	pollInterval        time.Duration
+	maintenanceInterval time.Duration
+	log                 func(string, ...interface{})
+	onRefreshSuccess    func(context.Context, string) error
 }
 
 func NewWorker(manager *Manager, jobs *jobstore.Store, options WorkerOptions) (*Worker, error) {
@@ -37,12 +41,16 @@ func NewWorker(manager *Manager, jobs *jobstore.Store, options WorkerOptions) (*
 	if options.PollInterval <= 0 {
 		options.PollInterval = 500 * time.Millisecond
 	}
+	if options.MaintenanceInterval <= 0 {
+		options.MaintenanceInterval = time.Minute
+	}
 	if options.Log == nil {
 		options.Log = func(string, ...interface{}) {}
 	}
 	return &Worker{
 		manager: manager, jobs: jobs, owner: options.Owner,
-		lease: options.Lease, pollInterval: options.PollInterval, log: options.Log,
+		lease: options.Lease, pollInterval: options.PollInterval,
+		maintenanceInterval: options.MaintenanceInterval, log: options.Log,
 		onRefreshSuccess: options.OnRefreshSuccess,
 	}, nil
 }
@@ -57,11 +65,28 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 	timer := time.NewTimer(0)
 	defer timer.Stop()
+	nextMaintenance := w.manager.now().UTC().Add(w.maintenanceInterval)
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-timer.C:
+		}
+		now := w.manager.now().UTC()
+		if !now.Before(nextMaintenance) {
+			recovered, recoveryErr := w.jobs.RecoverExpired(ctx)
+			if recoveryErr != nil {
+				w.log("recover expired source refresh jobs failed: %v", recoveryErr)
+			} else if recovered > 0 {
+				w.log("recovered %d expired jobs", recovered)
+			}
+			count, reconcileErr := w.manager.ReconcileRefreshSchedules(ctx)
+			if reconcileErr != nil {
+				w.log("reconcile source refresh schedules failed: %v", reconcileErr)
+			} else if count > 0 {
+				w.log("cancelled %d superseded source refresh jobs", count)
+			}
+			nextMaintenance = now.Add(w.maintenanceInterval)
 		}
 		worked, err := w.ProcessOne(ctx)
 		if err != nil {
@@ -84,7 +109,7 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 	if err != nil {
 		return true, err
 	}
-	result, refreshErr := w.manager.Refresh(ctx, job.SourceID, job.SourceRevisionID, job.CorrelationID)
+	result, refreshErr := w.manager.Refresh(ctx, job.SourceID, job.SourceRevisionID, job.CorrelationID, refreshTrigger(job.CorrelationID))
 	if refreshErr != nil {
 		if ctx.Err() != nil {
 			return true, nil
@@ -98,13 +123,17 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		if finishErr != nil {
 			return true, fmt.Errorf("refresh failed (%v) and job finalization failed: %w", refreshErr, finishErr)
 		}
-		next, scheduleErr := w.manager.NextRefreshAfterFailure(ctx, job.SourceID, job.SourceRevisionID)
+		next, scheduleErr := w.manager.NextRefreshAfterFailure(ctx, job.SourceID, job.SourceRevisionID, refreshErr)
 		if scheduleErr != nil {
 			w.log("read source %s schedule after refresh failure: %v", job.SourceID, scheduleErr)
-		} else if next != nil {
+		} else if next.At != nil {
+			correlationID := "schedule-after-failure-" + job.SourceID
+			if next.Retry {
+				correlationID = fmt.Sprintf("retry-%d-%s", next.RetryNumber, job.SourceID)
+			}
 			if _, enqueueErr := w.jobs.Enqueue(ctx, jobstore.EnqueueRequest{
 				SourceID: job.SourceID, SourceRevisionID: job.SourceRevisionID,
-				DueAt: *next, CorrelationID: "schedule-after-failure-" + job.SourceID,
+				DueAt: *next.At, CorrelationID: correlationID,
 			}); enqueueErr != nil {
 				return true, fmt.Errorf("schedule source refresh after failure: %w", enqueueErr)
 			}
@@ -126,10 +155,23 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 	if result.HealthScheduleError != nil {
 		w.log("health scheduling for source %s failed: %v", job.SourceID, result.HealthScheduleError)
 	}
-	if w.onRefreshSuccess != nil {
+	if result.Changed && w.onRefreshSuccess != nil {
 		if err := w.onRefreshSuccess(ctx, job.SourceID); err != nil {
 			w.log("enqueue managed outputs after source %s refresh failed: %v", job.SourceID, err)
 		}
 	}
 	return true, nil
+}
+
+func refreshTrigger(correlationID string) sourcestore.TriggerKind {
+	switch {
+	case strings.HasPrefix(correlationID, "retry-"):
+		return sourcestore.TriggerRetry
+	case strings.HasPrefix(correlationID, "api-refresh-"):
+		return sourcestore.TriggerManual
+	case strings.HasPrefix(correlationID, "create-"), strings.HasPrefix(correlationID, "update-"):
+		return sourcestore.TriggerImport
+	default:
+		return sourcestore.TriggerSchedule
+	}
 }

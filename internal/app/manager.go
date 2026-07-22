@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/crc32"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -31,7 +33,17 @@ import (
 	"github.com/doujialong/proxyloom/internal/storage/sourcestore"
 )
 
-const SourceConfigVersion = 4
+const (
+	SourceConfigVersion            = 5
+	DefaultSourceRetryCount        = 5
+	DefaultSourceStaleAfterSeconds = 72 * 60 * 60
+	MaxSourceRetryAfter            = 6 * time.Hour
+)
+
+var (
+	standardSourceRetryDelays = [...]time.Duration{time.Minute, 3 * time.Minute, 10 * time.Minute, 30 * time.Minute, time.Hour}
+	authSourceRetryDelays     = [...]time.Duration{10 * time.Minute, 30 * time.Minute, time.Hour, 2 * time.Hour, 4 * time.Hour}
+)
 
 type SourceConfig struct {
 	Type                     sourcestore.SourceType `json:"type"`
@@ -45,9 +57,12 @@ type SourceConfig struct {
 	MinimumNodes             int                    `json:"minimum_nodes"`
 	MaximumDropRatio         float64                `json:"maximum_drop_ratio"`
 	RefreshIntervalSeconds   int                    `json:"refresh_interval_seconds"`
+	RetryCount               int                    `json:"retry_count"`
+	StaleAfterSeconds        int                    `json:"stale_after_seconds"`
 	PrivateNetworkAuthorized bool                   `json:"private_network_authorized"`
 	MaxResponseBytes         int                    `json:"max_response_bytes"`
 	HealthFilterEnabled      bool                   `json:"health_filter_enabled"`
+	RetryCountSet            bool                   `json:"-"`
 }
 
 type ManagerOptions struct {
@@ -112,18 +127,23 @@ type RefreshResult struct {
 	Artifact            artifactstore.Artifact
 	DetectedFormat      string
 	NodeCount           int
+	Changed             bool
 	NextRefreshAt       *time.Time
 	HealthScheduleError error
 }
 
 type SourceDetail struct {
-	Source         sourcestore.Source
-	Draft          sourcestore.Revision
-	Published      *sourcestore.Revision
-	Config         SourceConfig
-	MaskedLocation string
-	MaskedProxy    string
-	Stale          bool
+	Source               sourcestore.Source
+	Draft                sourcestore.Revision
+	Published            *sourcestore.Revision
+	Config               SourceConfig
+	MaskedLocation       string
+	MaskedProxy          string
+	Stale                bool
+	ConsecutiveFailures  int
+	LastRefreshErrorCode string
+	NextRefreshAt        *time.Time
+	RetryScheduled       bool
 }
 
 type NodeDetail struct {
@@ -132,8 +152,17 @@ type NodeDetail struct {
 }
 
 type OperationError struct {
-	Code string
-	Err  error
+	Code       string
+	Err        error
+	HTTPStatus int
+	RetryAfter time.Duration
+}
+
+type RefreshFailureSchedule struct {
+	At                  *time.Time
+	Retry               bool
+	RetryNumber         int
+	ConsecutiveFailures int
 }
 
 func (e *OperationError) Error() string { return e.Code + ": " + e.Err.Error() }
@@ -277,24 +306,109 @@ func (m *Manager) EnqueueRefresh(ctx context.Context, sourceID, correlationID st
 	}
 	return m.jobs.Enqueue(ctx, jobstore.EnqueueRequest{
 		SourceID: source.ID, SourceRevisionID: source.PublishedRevisionID,
-		DueAt: m.now().UTC(), CorrelationID: correlationID,
+		DueAt: m.now().UTC(), Priority: 10, CorrelationID: correlationID,
+		ExpediteExisting: true,
 	})
 }
 
-func (m *Manager) NextRefreshAfterFailure(ctx context.Context, sourceID, revisionID string) (*time.Time, error) {
+func (m *Manager) NextRefreshAfterFailure(ctx context.Context, sourceID, revisionID string, refreshErr error) (RefreshFailureSchedule, error) {
+	source, err := m.sources.GetSource(ctx, sourceID)
+	if err != nil {
+		return RefreshFailureSchedule{}, err
+	}
+	if source.LifecycleState != "active" || source.PublishedRevisionID != revisionID {
+		return RefreshFailureSchedule{}, nil
+	}
 	revision, err := m.sources.GetRevision(ctx, sourceID, revisionID)
 	if err != nil {
-		return nil, err
+		return RefreshFailureSchedule{}, err
 	}
 	config, err := m.loadConfig(ctx, revision)
 	if err != nil {
-		return nil, err
+		return RefreshFailureSchedule{}, err
+	}
+	failures, err := m.sources.RefreshFailures(ctx, sourceID, revisionID, 200)
+	if err != nil {
+		return RefreshFailureSchedule{}, err
+	}
+	schedule := RefreshFailureSchedule{ConsecutiveFailures: failures.ConsecutiveFailures}
+	if config.Type == sourcestore.SourceRemote && retryableRefreshFailure(refreshErr) &&
+		failures.ConsecutiveFailures > 0 && failures.RetryAttempts < config.RetryCount {
+		retryNumber := failures.RetryAttempts + 1
+		delay := sourceRetryDelay(sourceID, retryNumber, refreshHTTPStatus(refreshErr))
+		if retryAfter := refreshRetryAfter(refreshErr); retryAfter > delay {
+			if retryAfter > MaxSourceRetryAfter {
+				retryAfter = MaxSourceRetryAfter
+			}
+			delay = retryAfter
+		}
+		next := m.now().UTC().Add(delay)
+		schedule.At = &next
+		schedule.Retry = true
+		schedule.RetryNumber = retryNumber
+		return schedule, nil
 	}
 	if config.RefreshIntervalSeconds <= 0 {
-		return nil, nil
+		return schedule, nil
 	}
 	next := m.now().UTC().Add(time.Duration(config.RefreshIntervalSeconds) * time.Second)
-	return &next, nil
+	schedule.At = &next
+	return schedule, nil
+}
+
+func (m *Manager) ReconcileRefreshSchedules(ctx context.Context) (int64, error) {
+	now := m.now().UTC()
+	options := sourcestore.SourceListOptions{Limit: 200}
+	var reconciled int64
+	for {
+		sources, hasMore, err := m.sources.ListSources(ctx, options)
+		if err != nil {
+			return reconciled, err
+		}
+		for _, source := range sources {
+			if source.PublishedRevisionID == "" {
+				continue
+			}
+			cancelled, err := m.jobs.CancelQueuedSuperseded(ctx, source.ID, source.PublishedRevisionID)
+			if err != nil {
+				return reconciled, err
+			}
+			reconciled += cancelled
+			revision, err := m.sources.GetRevision(ctx, source.ID, source.PublishedRevisionID)
+			if err != nil {
+				return reconciled, err
+			}
+			config, err := m.loadConfig(ctx, revision)
+			if err != nil {
+				return reconciled, err
+			}
+			if config.RefreshIntervalSeconds <= 0 {
+				continue
+			}
+			dueAt := now
+			if snapshot, snapshotErr := m.sources.CurrentSnapshot(ctx, source.ID); snapshotErr == nil {
+				dueAt = snapshot.AcceptedAt.Add(time.Duration(config.RefreshIntervalSeconds) * time.Second)
+				if dueAt.Before(now) {
+					dueAt = now
+				}
+			} else if !errors.Is(snapshotErr, sourcestore.ErrNoCurrentSnapshot) {
+				return reconciled, snapshotErr
+			}
+			if _, err := m.jobs.Enqueue(ctx, jobstore.EnqueueRequest{
+				SourceID: source.ID, SourceRevisionID: source.PublishedRevisionID,
+				DueAt: dueAt, CorrelationID: "schedule-reconcile-" + source.ID,
+			}); err != nil {
+				return reconciled, err
+			}
+		}
+		if !hasMore || len(sources) == 0 {
+			return reconciled, nil
+		}
+		last := sources[len(sources)-1]
+		before := last.UpdatedAt
+		options.BeforeUpdatedAt = &before
+		options.BeforeID = last.ID
+	}
 }
 
 func (m *Manager) EnqueueHealthRebuild(ctx context.Context, sourceID string) error {
@@ -461,13 +575,30 @@ func (m *Manager) sourceDetail(ctx context.Context, source sourcestore.Source) (
 			return SourceDetail{}, err
 		}
 		detail.Published = &published
+		failures, err := m.sources.RefreshFailures(ctx, source.ID, published.ID, 200)
+		if err != nil {
+			return SourceDetail{}, err
+		}
+		detail.ConsecutiveFailures = failures.ConsecutiveFailures
+		detail.LastRefreshErrorCode = failures.LastErrorCode
+		if job, exists, err := m.jobs.ActiveForSource(ctx, source.ID, published.ID); err != nil {
+			return SourceDetail{}, err
+		} else if exists {
+			next := job.DueAt
+			detail.NextRefreshAt = &next
+			detail.RetryScheduled = strings.HasPrefix(job.CorrelationID, "retry-")
+		}
 	}
 	if source.CurrentSnapshotID != "" {
 		snapshot, err := m.sources.CurrentSnapshot(ctx, source.ID)
 		if err != nil {
 			return SourceDetail{}, err
 		}
-		detail.Stale = !m.now().UTC().Before(snapshot.StaleAfter)
+		lastAccepted := snapshot.AcceptedAt
+		if source.Health == "healthy" && source.PublishedRevisionID == snapshot.SourceRevisionID && source.UpdatedAt.After(lastAccepted) {
+			lastAccepted = source.UpdatedAt
+		}
+		detail.Stale = !m.now().UTC().Before(lastAccepted.Add(staleDuration(config.StaleAfterSeconds)))
 	}
 	return detail, nil
 }
@@ -494,10 +625,10 @@ func maskProxyLocation(raw string) string {
 	return parsed.Scheme + "://" + parsed.Host
 }
 
-func (m *Manager) Refresh(ctx context.Context, sourceID, revisionID, correlationID string) (RefreshResult, error) {
+func (m *Manager) Refresh(ctx context.Context, sourceID, revisionID, correlationID string, trigger sourcestore.TriggerKind) (RefreshResult, error) {
 	attempt, err := m.sources.StartAttempt(ctx, sourcestore.StartAttemptRequest{
 		SourceID: sourceID, SourceRevisionID: revisionID,
-		Trigger: sourcestore.TriggerSchedule, CorrelationID: correlationID,
+		Trigger: trigger, CorrelationID: correlationID,
 	})
 	if err != nil {
 		return RefreshResult{}, operationError("attempt_start_failed", err)
@@ -511,9 +642,15 @@ func (m *Manager) Refresh(ctx context.Context, sourceID, revisionID, correlation
 	if err != nil {
 		return RefreshResult{}, m.failAttempt(ctx, attempt.ID, "config_invalid", err, sourcestore.AttemptMetrics{})
 	}
-	content, mediaType, httpStatus, err := m.obtainContent(ctx, config)
+	content, mediaType, httpStatus, retryAfter, err := m.obtainContent(ctx, config)
 	if err != nil {
-		return RefreshResult{}, m.failAttempt(ctx, attempt.ID, "fetch_failed", err, metricsSince(started, 0, httpStatus))
+		failure := m.failAttempt(ctx, attempt.ID, "fetch_failed", err, metricsSince(started, 0, httpStatus))
+		var operation *OperationError
+		if errors.As(failure, &operation) {
+			operation.HTTPStatus = httpStatus
+			operation.RetryAfter = retryAfter
+		}
+		return RefreshResult{}, failure
 	}
 	existing, err := m.loadOccurrences(ctx, sourceID)
 	if err != nil {
@@ -551,6 +688,60 @@ func (m *Manager) Refresh(ctx context.Context, sourceID, revisionID, correlation
 		count := processed.nodeCount
 		return RefreshResult{}, m.rejectAttempt(ctx, attempt.ID, "content_gate_rejected", err, &count, metricsSince(started, len(content), httpStatus))
 	}
+	metrics := metricsSince(started, len(content), httpStatus)
+	if previous, rawBlobID, currentErr := m.sources.CurrentRawBlobID(ctx, sourceID); currentErr == nil && previous.SourceRevisionID == revisionID {
+		matches, matchErr := m.blobs.ContentMatches(ctx, rawBlobID, "raw_document", content)
+		if matchErr != nil {
+			return RefreshResult{}, m.failAttempt(ctx, attempt.ID, "snapshot_compare_failed", matchErr, metrics)
+		}
+		if matches {
+			currentArtifact, artifactErr := m.artifacts.Current(ctx, sourceID)
+			artifactMatches := artifactErr == nil && currentArtifact.SnapshotID == previous.ID &&
+				currentArtifact.ContentType == processed.contentType && currentArtifact.NodeCount == processed.includedCount &&
+				currentArtifact.WarningCount == processed.warningCount && currentArtifact.OutputFormat == processed.outputFormat &&
+				currentArtifact.BuilderVersion == processed.builderVersion
+			if artifactMatches {
+				artifactMatches, matchErr = m.blobs.ContentMatches(ctx, currentArtifact.ContentBlobID, "artifact", processed.artifact)
+				if matchErr != nil {
+					return RefreshResult{}, m.failAttempt(ctx, attempt.ID, "artifact_compare_failed", matchErr, metrics)
+				}
+			} else if artifactErr != nil && !errors.Is(artifactErr, artifactstore.ErrNotFound) {
+				return RefreshResult{}, m.failAttempt(ctx, attempt.ID, "artifact_read_failed", artifactErr, metrics)
+			}
+			snapshot, _, completeErr := m.sources.CompleteUnchanged(ctx, attempt.ID, previous.ID, metrics)
+			if completeErr != nil {
+				return RefreshResult{}, operationError("unchanged_refresh_failed", completeErr)
+			}
+			result := RefreshResult{
+				Snapshot: snapshot, Artifact: currentArtifact, DetectedFormat: processed.detectedFormat,
+				NodeCount: processed.includedCount, Changed: !artifactMatches,
+			}
+			if !artifactMatches {
+				artifactBlob, putErr := m.blobs.Put(ctx, blobstore.PutRequest{Kind: "artifact", Plaintext: processed.artifact, Public: true})
+				if putErr != nil {
+					return RefreshResult{}, operationError("artifact_store_failed", putErr)
+				}
+				published, publishErr := m.artifacts.Publish(ctx, artifactstore.PublishRequest{
+					SourceID: sourceID, SnapshotID: snapshot.ID, ContentBlobID: artifactBlob.ID,
+					ContentType: processed.contentType, NodeCount: processed.includedCount,
+					WarningCount: processed.warningCount, OutputFormat: processed.outputFormat,
+					BuilderVersion: processed.builderVersion,
+				})
+				if publishErr != nil {
+					_, _ = m.blobs.DeleteUnreferenced(context.Background(), artifactBlob.ID)
+					return RefreshResult{}, operationError("artifact_publish_failed", publishErr)
+				}
+				result.Artifact = published
+			}
+			if config.RefreshIntervalSeconds > 0 {
+				next := m.now().UTC().Add(time.Duration(config.RefreshIntervalSeconds) * time.Second)
+				result.NextRefreshAt = &next
+			}
+			return result, nil
+		}
+	} else if currentErr != nil && !errors.Is(currentErr, sourcestore.ErrNoCurrentSnapshot) {
+		return RefreshResult{}, m.failAttempt(ctx, attempt.ID, "snapshot_read_failed", currentErr, metrics)
+	}
 	rawDocument, err := m.blobs.Put(ctx, blobstore.PutRequest{Kind: "raw_document", Plaintext: content})
 	if err != nil {
 		return RefreshResult{}, m.failAttempt(ctx, attempt.ID, "raw_document_store_failed", err, metricsSince(started, len(content), httpStatus))
@@ -559,7 +750,6 @@ func (m *Manager) Refresh(ctx context.Context, sourceID, revisionID, correlation
 	if err != nil {
 		return RefreshResult{}, m.failAttempt(ctx, attempt.ID, "node_store_failed", err, metricsSince(started, len(content), httpStatus))
 	}
-	metrics := metricsSince(started, len(content), httpStatus)
 	artifactBlob, err := m.blobs.Put(ctx, blobstore.PutRequest{Kind: "artifact", Plaintext: processed.artifact, Public: true})
 	if err != nil {
 		return RefreshResult{}, m.failAttempt(ctx, attempt.ID, "artifact_store_failed", err, metrics)
@@ -570,7 +760,7 @@ func (m *Manager) Refresh(ctx context.Context, sourceID, revisionID, correlation
 		MediaType: mediaType, Charset: "utf-8", ParseLimitsVersion: 1,
 		NodeCount: processed.nodeCount, LogicalOutboundCount: processed.logicalCount,
 		WarningCount: processed.warningCount, OccurrenceAlgorithmVersion: occurrence.AlgorithmVersion,
-		StaleAfter: staleDuration(config.RefreshIntervalSeconds), RetainFor: 30 * 24 * time.Hour,
+		StaleAfter: staleDuration(config.StaleAfterSeconds), RetainFor: 30 * 24 * time.Hour,
 		Metrics: metrics, Nodes: acceptedNodes, Occurrences: processed.occurrences,
 	})
 	if err != nil {
@@ -587,7 +777,7 @@ func (m *Manager) Refresh(ctx context.Context, sourceID, revisionID, correlation
 	}
 	result := RefreshResult{
 		Snapshot: snapshot, Artifact: artifact, DetectedFormat: processed.detectedFormat,
-		NodeCount: processed.includedCount,
+		NodeCount: processed.includedCount, Changed: true,
 	}
 	if config.RefreshIntervalSeconds > 0 {
 		next := m.now().UTC().Add(time.Duration(config.RefreshIntervalSeconds) * time.Second)
@@ -1140,6 +1330,7 @@ func (m *Manager) loadConfig(ctx context.Context, revision sourcestore.Revision)
 	if err := decoder.Decode(&config); err != nil {
 		return SourceConfig{}, fmt.Errorf("decode source config: %w", err)
 	}
+	config.RetryCountSet = revision.Config.ConfigSchemaVersion >= 5
 	config = normalizeConfig(config)
 	if err := validateConfig(config); err != nil {
 		return SourceConfig{}, err
@@ -1150,9 +1341,9 @@ func (m *Manager) loadConfig(ctx context.Context, revision sourcestore.Revision)
 	return config, nil
 }
 
-func (m *Manager) obtainContent(ctx context.Context, config SourceConfig) ([]byte, string, int, error) {
+func (m *Manager) obtainContent(ctx context.Context, config SourceConfig) ([]byte, string, int, time.Duration, error) {
 	if config.Type == sourcestore.SourceInline {
-		return []byte(config.InlineContent), "text/plain", 0, nil
+		return []byte(config.InlineContent), "text/plain", 0, 0, nil
 	}
 	result, err := fetcher.Fetch(ctx, config.URL, fetcher.Options{
 		Timeout: time.Duration(config.TimeoutSeconds) * time.Second, MaxBytes: config.MaxResponseBytes,
@@ -1160,9 +1351,9 @@ func (m *Manager) obtainContent(ctx context.Context, config SourceConfig) ([]byt
 		ProxyURL: config.ProxyURL,
 	})
 	if err != nil {
-		return nil, "", result.StatusCode, err
+		return nil, "", result.StatusCode, result.RetryAfter, err
 	}
-	return result.Content, result.ContentType, result.StatusCode, nil
+	return result.Content, result.ContentType, result.StatusCode, 0, nil
 }
 
 func (m *Manager) failAttempt(ctx context.Context, attemptID, code string, cause error, metrics sourcestore.AttemptMetrics) error {
@@ -1203,6 +1394,13 @@ func normalizeConfig(config SourceConfig) SourceConfig {
 	if config.Type == sourcestore.SourceRemote && config.TimeoutSeconds == 0 {
 		config.TimeoutSeconds = int(fetcher.DefaultTimeout / time.Second)
 	}
+	if !config.RetryCountSet {
+		config.RetryCount = DefaultSourceRetryCount
+		config.RetryCountSet = true
+	}
+	if config.StaleAfterSeconds == 0 {
+		config.StaleAfterSeconds = DefaultSourceStaleAfterSeconds
+	}
 	return config
 }
 
@@ -1237,6 +1435,12 @@ func validateConfig(config SourceConfig) error {
 	if config.RefreshIntervalSeconds != 0 && (config.RefreshIntervalSeconds < 60 || config.RefreshIntervalSeconds > 30*24*60*60) {
 		return fmt.Errorf("refresh interval must be zero or between 60 seconds and 30 days")
 	}
+	if config.RetryCount < 0 || config.RetryCount > len(standardSourceRetryDelays) {
+		return fmt.Errorf("source retry count must be between 0 and %d", len(standardSourceRetryDelays))
+	}
+	if config.StaleAfterSeconds < 60*60 || config.StaleAfterSeconds > 30*24*60*60 {
+		return fmt.Errorf("source stale duration must be between 1 hour and 30 days")
+	}
 	if config.MaxResponseBytes < 1024 || config.MaxResponseBytes > fetcher.HardMaxBytes {
 		return fmt.Errorf("maximum response bytes must be between 1 KiB and 50 MiB")
 	}
@@ -1270,15 +1474,56 @@ func metricsSince(started time.Time, responseBytes, status int) sourcestore.Atte
 	return metrics
 }
 
-func staleDuration(intervalSeconds int) time.Duration {
-	if intervalSeconds <= 0 {
-		return 72 * time.Hour
+func staleDuration(staleAfterSeconds int) time.Duration {
+	if staleAfterSeconds <= 0 {
+		return time.Duration(DefaultSourceStaleAfterSeconds) * time.Second
 	}
-	duration := 3 * time.Duration(intervalSeconds) * time.Second
-	if duration < time.Hour {
-		return time.Hour
+	return time.Duration(staleAfterSeconds) * time.Second
+}
+
+func retryableRefreshFailure(err error) bool {
+	var operation *OperationError
+	if !errors.As(err, &operation) {
+		return true
 	}
-	return duration
+	if operation.Code == "config_invalid" || operation.Code == "config_unavailable" {
+		return false
+	}
+	return operation.HTTPStatus != http.StatusNotFound && operation.HTTPStatus != http.StatusGone
+}
+
+func refreshHTTPStatus(err error) int {
+	var operation *OperationError
+	if errors.As(err, &operation) {
+		return operation.HTTPStatus
+	}
+	return 0
+}
+
+func refreshRetryAfter(err error) time.Duration {
+	var operation *OperationError
+	if errors.As(err, &operation) {
+		return operation.RetryAfter
+	}
+	return 0
+}
+
+func sourceRetryDelay(sourceID string, consecutiveFailures, httpStatus int) time.Duration {
+	delays := standardSourceRetryDelays[:]
+	if httpStatus == http.StatusUnauthorized || httpStatus == http.StatusForbidden {
+		delays = authSourceRetryDelays[:]
+	}
+	index := consecutiveFailures - 1
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(delays) {
+		index = len(delays) - 1
+	}
+	delay := delays[index]
+	checksum := crc32.ChecksumIEEE([]byte(fmt.Sprintf("%s/%d", sourceID, consecutiveFailures)))
+	permille := int64(checksum%401) - 200
+	return delay + time.Duration(int64(delay)*permille/1000)
 }
 
 func refreshSchedule(intervalSeconds int) string {

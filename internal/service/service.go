@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/doujialong/proxyloom/internal/aggregate"
 	"github.com/doujialong/proxyloom/internal/app"
 	"github.com/doujialong/proxyloom/internal/auth"
@@ -21,6 +22,7 @@ import (
 	singboxexecutor "github.com/doujialong/proxyloom/internal/executor/singbox"
 	"github.com/doujialong/proxyloom/internal/httpapi"
 	"github.com/doujialong/proxyloom/internal/managedbackup"
+	"github.com/doujialong/proxyloom/internal/retention"
 	"github.com/doujialong/proxyloom/internal/storage/artifactstore"
 	"github.com/doujialong/proxyloom/internal/storage/blobstore"
 	"github.com/doujialong/proxyloom/internal/storage/healthstore"
@@ -29,7 +31,6 @@ import (
 	"github.com/doujialong/proxyloom/internal/storage/outputstore"
 	"github.com/doujialong/proxyloom/internal/storage/sourcestore"
 	storagesqlite "github.com/doujialong/proxyloom/internal/storage/sqlite"
-	"github.com/google/uuid"
 )
 
 type Config struct {
@@ -53,10 +54,12 @@ type Service struct {
 	admin        *auth.Token
 	sessions     *auth.Store
 	jobs         *jobstore.Store
+	manager      *app.Manager
 	worker       *app.Worker
 	outputWorker *aggregate.Worker
 	healthWorker *app.HealthWorker
 	healthStore  *healthstore.Store
+	retention    *retention.Cleaner
 	outputs      *outputstore.Store
 	outputJobs   *outputjobstore.Store
 	aggregate    *aggregate.Manager
@@ -150,6 +153,13 @@ func Open(ctx context.Context, config Config) (*Service, error) {
 	if err != nil {
 		return fail(service, err)
 	}
+	retentionCleaner, err := retention.New(sqliteStore.DB(), blobs, retention.Options{
+		Log: log.Printf, BackupDir: backupDir,
+	})
+	if err != nil {
+		return fail(service, err)
+	}
+	service.retention = retentionCleaner
 	sources, err := sourcestore.New(sqliteStore.DB(), sourcestore.Options{Now: time.Now, NewID: newID})
 	if err != nil {
 		return fail(service, err)
@@ -285,6 +295,7 @@ func Open(ctx context.Context, config Config) (*Service, error) {
 		return fail(service, err)
 	}
 	service.worker = worker
+	service.manager = manager
 	service.outputWorker = outputWorker
 	service.jobs = jobs
 	service.api = api
@@ -297,7 +308,7 @@ func Open(ctx context.Context, config Config) (*Service, error) {
 }
 
 func (s *Service) Serve(ctx context.Context) error {
-	if s == nil || s.httpServer == nil || s.worker == nil || s.outputWorker == nil {
+	if s == nil || s.httpServer == nil || s.worker == nil || s.outputWorker == nil || s.retention == nil {
 		return fmt.Errorf("service is not initialized")
 	}
 	listener, err := net.Listen("tcp", s.config.Listen)
@@ -307,6 +318,15 @@ func (s *Service) Serve(ctx context.Context) error {
 	log.Printf("ProxyLoom listening on http://%s", listener.Addr().String())
 	runContext, cancel := context.WithCancel(ctx)
 	defer cancel()
+	retentionDone := make(chan struct{})
+	go func() {
+		s.retention.Run(runContext)
+		close(retentionDone)
+	}()
+	defer func() {
+		cancel()
+		<-retentionDone
+	}()
 	workerDone := make(chan error, 1)
 	go func() { workerDone <- s.worker.Run(runContext) }()
 	outputWorkerDone := make(chan error, 1)

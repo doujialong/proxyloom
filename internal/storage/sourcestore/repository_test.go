@@ -85,6 +85,10 @@ func TestSourceSnapshotLifecycleKeepsLastValidSnapshot(t *testing.T) {
 	if err != nil || afterFailure.CurrentSnapshotID != snapshot.ID || afterFailure.Health != "degraded" {
 		t.Fatalf("source after failure = %+v, %v", afterFailure, err)
 	}
+	failureState, err := environment.repository.RefreshFailures(context.Background(), source.ID, published.Published.ID, 10)
+	if err != nil || failureState.ConsecutiveFailures != 1 || failureState.RetryAttempts != 0 || failureState.LastErrorCode != "minimum_nodes" {
+		t.Fatalf("refresh failures after rejection = %+v, %v", failureState, err)
+	}
 
 	environment.advance(time.Hour)
 	notModifiedAttempt := environment.startAttempt(t, source.ID, published.Published.ID, TriggerSchedule)
@@ -95,6 +99,10 @@ func TestSourceSnapshotLifecycleKeepsLastValidSnapshot(t *testing.T) {
 	if err != nil || reused.ID != snapshot.ID || completed.AcceptedSnapshotID != snapshot.ID {
 		t.Fatalf("CompleteNotModified() = %+v, %+v, %v", reused, completed, err)
 	}
+	failureState, err = environment.repository.RefreshFailures(context.Background(), source.ID, published.Published.ID, 10)
+	if err != nil || failureState.ConsecutiveFailures != 0 || failureState.LastErrorCode != "" {
+		t.Fatalf("refresh failures after success = %+v, %v", failureState, err)
+	}
 	var snapshots, documents int
 	if err := environment.database.QueryRow("SELECT count(*) FROM snapshots WHERE source_id = ?", source.ID).Scan(&snapshots); err != nil {
 		t.Fatal(err)
@@ -104,6 +112,24 @@ func TestSourceSnapshotLifecycleKeepsLastValidSnapshot(t *testing.T) {
 	}
 	if snapshots != 1 || documents != 1 {
 		t.Fatalf("304 created history rows: snapshots=%d documents=%d", snapshots, documents)
+	}
+
+	environment.advance(time.Hour)
+	unchangedAttempt := environment.startAttempt(t, source.ID, published.Published.ID, TriggerSchedule)
+	reused, completed, err = environment.repository.CompleteUnchanged(context.Background(), unchangedAttempt.ID, snapshot.ID, AttemptMetrics{
+		HTTPStatus: &httpOK, ResponseBytes: &responseBytes,
+	})
+	if err != nil || reused.ID != snapshot.ID || completed.Status != AttemptSucceeded || completed.AcceptedSnapshotID != snapshot.ID {
+		t.Fatalf("CompleteUnchanged() = %+v, %+v, %v", reused, completed, err)
+	}
+	if err := environment.database.QueryRow("SELECT count(*) FROM snapshots WHERE source_id = ?", source.ID).Scan(&snapshots); err != nil {
+		t.Fatal(err)
+	}
+	if err := environment.database.QueryRow("SELECT count(*) FROM raw_documents WHERE source_id = ?", source.ID).Scan(&documents); err != nil {
+		t.Fatal(err)
+	}
+	if snapshots != 1 || documents != 1 {
+		t.Fatalf("unchanged 200 created history rows: snapshots=%d documents=%d", snapshots, documents)
 	}
 
 	environment.advance(time.Hour)
@@ -129,6 +155,38 @@ func TestSourceSnapshotLifecycleKeepsLastValidSnapshot(t *testing.T) {
 	current, err = environment.repository.CurrentSnapshot(context.Background(), source.ID)
 	if err != nil || current.ID != newSnapshot.ID {
 		t.Fatalf("current snapshot after rollback attempt = %+v, %v", current, err)
+	}
+}
+
+func TestRefreshFailuresTracksCurrentRetryWindow(t *testing.T) {
+	environment := newTestEnvironment(t)
+	defer environment.close()
+	source, draft := environment.createSource(t, "Retry window")
+	published, err := environment.repository.Publish(context.Background(), source.ID, draft.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 3; index++ {
+		attempt := environment.startAttempt(t, source.ID, published.Published.ID, TriggerRetry)
+		if _, err := environment.repository.CompleteFailure(context.Background(), FailureRequest{
+			AttemptID: attempt.ID, Status: AttemptFailed, ErrorCode: "temporary", ErrorDetail: "temporary failure",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state, err := environment.repository.RefreshFailures(context.Background(), source.ID, published.Published.ID, 10)
+	if err != nil || state.ConsecutiveFailures != 3 || state.RetryAttempts != 3 {
+		t.Fatalf("retry window state = %+v, %v", state, err)
+	}
+	periodic := environment.startAttempt(t, source.ID, published.Published.ID, TriggerSchedule)
+	if _, err := environment.repository.CompleteFailure(context.Background(), FailureRequest{
+		AttemptID: periodic.ID, Status: AttemptFailed, ErrorCode: "temporary", ErrorDetail: "new periodic failure",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state, err = environment.repository.RefreshFailures(context.Background(), source.ID, published.Published.ID, 10)
+	if err != nil || state.ConsecutiveFailures != 4 || state.RetryAttempts != 0 {
+		t.Fatalf("new retry window state = %+v, %v", state, err)
 	}
 }
 

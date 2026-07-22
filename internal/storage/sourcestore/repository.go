@@ -147,6 +147,12 @@ type Attempt struct {
 	FinishedAt         *time.Time
 }
 
+type RefreshFailureState struct {
+	ConsecutiveFailures int
+	RetryAttempts       int
+	LastErrorCode       string
+}
+
 type StartAttemptRequest struct {
 	SourceID         string
 	SourceRevisionID string
@@ -805,6 +811,82 @@ UPDATE sources SET source_health = 'healthy', health_reason_code = NULL, updated
 	return snapshot, attempt, nil
 }
 
+// CompleteUnchanged records a successful refresh that returned the exact
+// content already represented by the current snapshot.
+func (r *Repository) CompleteUnchanged(ctx context.Context, attemptID, expectedSnapshotID string, metrics AttemptMetrics) (Snapshot, Attempt, error) {
+	if !validID(attemptID) || !validID(expectedSnapshotID) {
+		return Snapshot{}, Attempt{}, ErrNotFound
+	}
+	if invalidMetrics(metrics) || metrics.HTTPStatus != nil && (*metrics.HTTPStatus < 200 || *metrics.HTTPStatus > 299) {
+		return Snapshot{}, Attempt{}, fmt.Errorf("unchanged refresh requires no HTTP status or a successful one")
+	}
+	now, err := r.currentTime()
+	if err != nil {
+		return Snapshot{}, Attempt{}, err
+	}
+	tx, err := r.database.BeginTx(ctx, nil)
+	if err != nil {
+		return Snapshot{}, Attempt{}, fmt.Errorf("begin unchanged refresh: %w", err)
+	}
+	defer tx.Rollback()
+	attempt, err := readAttempt(ctx, tx, attemptID)
+	if err != nil {
+		return Snapshot{}, Attempt{}, err
+	}
+	if attempt.Status != AttemptRunning {
+		return Snapshot{}, Attempt{}, ErrConflict
+	}
+	var currentSnapshotID sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT current_snapshot_id FROM sources WHERE id = ?`, attempt.SourceID).Scan(&currentSnapshotID); err != nil {
+		return Snapshot{}, Attempt{}, fmt.Errorf("read current snapshot for unchanged refresh: %w", err)
+	}
+	if !currentSnapshotID.Valid || currentSnapshotID.String != expectedSnapshotID {
+		return Snapshot{}, Attempt{}, ErrConflict
+	}
+	snapshot, err := readSnapshot(ctx, tx, expectedSnapshotID, attempt.SourceID)
+	if err != nil {
+		return Snapshot{}, Attempt{}, err
+	}
+	if snapshot.SourceRevisionID != attempt.SourceRevisionID {
+		return Snapshot{}, Attempt{}, ErrConflict
+	}
+	result, err := tx.ExecContext(ctx, `
+UPDATE refresh_attempts
+SET status = 'succeeded', http_status = ?, total_ms = ?, response_bytes = ?,
+    node_count = ?, warning_count = ?, accepted_snapshot_id = ?, finished_at = ?
+WHERE id = ? AND status = 'running'`,
+		nullableInt(metrics.HTTPStatus), nullableInt(metrics.TotalMS), nullableInt(metrics.ResponseBytes),
+		snapshot.NodeCount, snapshot.WarningCount, snapshot.ID, now.UnixMilli(), attempt.ID)
+	if err != nil {
+		return Snapshot{}, Attempt{}, fmt.Errorf("finish unchanged refresh attempt: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return Snapshot{}, Attempt{}, ErrConflict
+	}
+	result, err = tx.ExecContext(ctx, `
+UPDATE sources
+SET source_health = 'healthy', health_reason_code = NULL, updated_at = ?
+WHERE id = ? AND current_snapshot_id = ?`, now.UnixMilli(), attempt.SourceID, expectedSnapshotID)
+	if err != nil {
+		return Snapshot{}, Attempt{}, fmt.Errorf("mark unchanged source healthy: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return Snapshot{}, Attempt{}, ErrConflict
+	}
+	if err := tx.Commit(); err != nil {
+		return Snapshot{}, Attempt{}, fmt.Errorf("commit unchanged refresh: %w", err)
+	}
+	attempt.Status = AttemptSucceeded
+	attempt.HTTPStatus = cloneInt(metrics.HTTPStatus)
+	attempt.TotalMS = cloneInt(metrics.TotalMS)
+	attempt.ResponseBytes = cloneInt(metrics.ResponseBytes)
+	attempt.NodeCount = intPointer(snapshot.NodeCount)
+	attempt.WarningCount = snapshot.WarningCount
+	attempt.AcceptedSnapshotID = snapshot.ID
+	attempt.FinishedAt = timePointer(now)
+	return snapshot, attempt, nil
+}
+
 func (r *Repository) GetSource(ctx context.Context, id string) (Source, error) {
 	if !validID(id) {
 		return Source{}, ErrNotFound
@@ -979,6 +1061,50 @@ ORDER BY started_at DESC, id DESC LIMIT ?`, sourceID, limit)
 		result[index] = attempt
 	}
 	return result, nil
+}
+
+func (r *Repository) RefreshFailures(ctx context.Context, sourceID, revisionID string, limit int) (RefreshFailureState, error) {
+	if !validID(sourceID) || !validID(revisionID) {
+		return RefreshFailureState{}, ErrNotFound
+	}
+	if limit < 1 || limit > 200 {
+		return RefreshFailureState{}, fmt.Errorf("refresh failure limit must be between 1 and 200")
+	}
+	rows, err := r.database.QueryContext(ctx, `
+SELECT status, trigger_kind, COALESCE(error_code, '')
+FROM refresh_attempts
+WHERE source_id = ? AND source_revision_id = ? AND status <> 'running'
+ORDER BY started_at DESC, id DESC LIMIT ?`, sourceID, revisionID, limit)
+	if err != nil {
+		return RefreshFailureState{}, fmt.Errorf("list consecutive refresh failures: %w", err)
+	}
+	defer rows.Close()
+	var state RefreshFailureState
+	retrySequence := true
+	for rows.Next() {
+		var status AttemptStatus
+		var trigger TriggerKind
+		var errorCode string
+		if err := rows.Scan(&status, &trigger, &errorCode); err != nil {
+			return RefreshFailureState{}, fmt.Errorf("scan consecutive refresh failure: %w", err)
+		}
+		if status != AttemptFailed && status != AttemptRejected {
+			break
+		}
+		if state.ConsecutiveFailures == 0 {
+			state.LastErrorCode = errorCode
+		}
+		if retrySequence && trigger == TriggerRetry {
+			state.RetryAttempts++
+		} else {
+			retrySequence = false
+		}
+		state.ConsecutiveFailures++
+	}
+	if err := rows.Err(); err != nil {
+		return RefreshFailureState{}, fmt.Errorf("iterate consecutive refresh failures: %w", err)
+	}
+	return state, nil
 }
 
 func (r *Repository) ListSnapshots(ctx context.Context, sourceID string, limit int) ([]Snapshot, error) {
@@ -1169,6 +1295,21 @@ func (r *Repository) CurrentSnapshot(ctx context.Context, sourceID string) (Snap
 		return Snapshot{}, ErrNoCurrentSnapshot
 	}
 	return readSnapshot(ctx, r.database, snapshotID.String, sourceID)
+}
+
+func (r *Repository) CurrentRawBlobID(ctx context.Context, sourceID string) (Snapshot, string, error) {
+	snapshot, err := r.CurrentSnapshot(ctx, sourceID)
+	if err != nil {
+		return Snapshot{}, "", err
+	}
+	var blobID string
+	if err := r.database.QueryRowContext(ctx, `
+SELECT blob_id FROM raw_documents WHERE id = ? AND source_id = ?`, snapshot.RawDocumentID, sourceID).Scan(&blobID); errors.Is(err, sql.ErrNoRows) {
+		return Snapshot{}, "", ErrNotFound
+	} else if err != nil {
+		return Snapshot{}, "", fmt.Errorf("read current raw document blob: %w", err)
+	}
+	return snapshot, blobID, nil
 }
 
 func (r *Repository) GetAttempt(ctx context.Context, id string) (Attempt, error) {

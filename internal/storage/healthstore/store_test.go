@@ -1,8 +1,12 @@
 package healthstore
 
 import (
+	"context"
+	"database/sql"
 	"testing"
 	"time"
+
+	storagesqlite "github.com/doujialong/proxyloom/internal/storage/sqlite"
 )
 
 func TestApplyTransitionFailureAndRecoverySchedule(t *testing.T) {
@@ -69,5 +73,58 @@ func TestApplyTransitionInfrastructureAndUnsupported(t *testing.T) {
 	})
 	if unsupported.State != StateUnsupported || unsupported.NextCheckAt != nil {
 		t.Fatalf("unsupported transition = %+v", unsupported)
+	}
+}
+
+func TestNodeOverviewAndCapacityExcludeInactiveOccurrences(t *testing.T) {
+	database, err := sql.Open(storagesqlite.DriverName, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	database.SetMaxOpenConns(1)
+	if _, err := database.Exec(`
+CREATE TABLE fingerprints(id TEXT PRIMARY KEY, protocol_id TEXT, kind TEXT);
+CREATE TABLE node_occurrences(
+  id TEXT PRIMARY KEY, source_id TEXT, current_fingerprint_id TEXT,
+  lifecycle_state TEXT, last_seen_at INTEGER, updated_at INTEGER
+);
+CREATE TABLE node_health_states(
+  node_occurrence_id TEXT PRIMARY KEY, state TEXT, stale INTEGER, updated_at INTEGER
+);
+CREATE TABLE probe_queue_items(node_occurrence_id TEXT PRIMARY KEY, status TEXT);
+CREATE TABLE snapshot_occurrences(snapshot_id TEXT, raw_node_id TEXT, node_occurrence_id TEXT);
+CREATE TABLE snapshots(id TEXT PRIMARY KEY, accepted_at INTEGER);
+CREATE TABLE raw_nodes(id TEXT PRIMARY KEY, original_name_blob_id TEXT, source_ordinal INTEGER);
+`); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	if _, err := database.Exec(`
+INSERT INTO fingerprints VALUES ('fingerprint', 'vless', 'semantic');
+INSERT INTO node_occurrences VALUES ('present', 'source', 'fingerprint', 'present', ?, ?);
+INSERT INTO node_occurrences VALUES ('absent', 'source', 'fingerprint', 'absent', ?, ?);
+INSERT INTO node_health_states VALUES ('present', 'unhealthy', 0, ?);
+INSERT INTO node_health_states VALUES ('absent', 'unhealthy', 0, ?);
+INSERT INTO probe_queue_items VALUES ('present', 'queued');
+INSERT INTO probe_queue_items VALUES ('absent', 'queued');
+`, now.UnixMilli(), now.UnixMilli(), now.Add(-time.Hour).UnixMilli(), now.UnixMilli(), now.UnixMilli(), now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	store, err := New(database, Options{Now: func() time.Time { return now }, NewID: func() string { return "id" }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, _, err := store.ListNodes(context.Background(), NodeListOptions{PresentOnly: true, Limit: 10})
+	if err != nil || len(items) != 1 || items[0].NodeOccurrenceID != "present" {
+		t.Fatalf("present ListNodes() = %+v, %v", items, err)
+	}
+	all, _, err := store.ListNodes(context.Background(), NodeListOptions{Limit: 10})
+	if err != nil || len(all) != 2 {
+		t.Fatalf("all ListNodes() = %+v, %v", all, err)
+	}
+	capacity, err := store.Capacity(context.Background())
+	if err != nil || capacity.Total != 1 || capacity.Queued != 1 {
+		t.Fatalf("Capacity() = %+v, %v", capacity, err)
 	}
 }

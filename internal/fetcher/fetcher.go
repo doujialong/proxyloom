@@ -40,6 +40,7 @@ type Result struct {
 	StatusCode  int
 	ContentType string
 	Elapsed     time.Duration
+	RetryAfter  time.Duration
 }
 
 func Fetch(ctx context.Context, rawURL string, options Options) (Result, error) {
@@ -136,7 +137,11 @@ func Fetch(ctx context.Context, rawURL string, options Options) (Result, error) 
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode > 299 {
-		return Result{StatusCode: response.StatusCode, Elapsed: elapsed}, fmt.Errorf("remote source returned HTTP %d", response.StatusCode)
+		return Result{
+			StatusCode: response.StatusCode,
+			Elapsed:    elapsed,
+			RetryAfter: parseRetryAfter(response.Header.Get("Retry-After"), time.Now()),
+		}, fmt.Errorf("remote source returned HTTP %d", response.StatusCode)
 	}
 	limited := io.LimitReader(response.Body, int64(options.MaxBytes)+1)
 	content, err := io.ReadAll(limited)
@@ -150,6 +155,24 @@ func Fetch(ctx context.Context, rawURL string, options Options) (Result, error) 
 		Content: content, StatusCode: response.StatusCode,
 		ContentType: response.Header.Get("Content-Type"), Elapsed: elapsed,
 	}, nil
+}
+
+func parseRetryAfter(raw string, now time.Time) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(raw); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	when, err := http.ParseTime(raw)
+	if err != nil || !when.After(now) {
+		return 0
+	}
+	return when.Sub(now)
 }
 
 func ValidateHeaders(headers map[string]string) error {

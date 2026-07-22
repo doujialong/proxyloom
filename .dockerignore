@@ -5,6 +5,7 @@
 coverage.out
 dist
 tmp
+backups
 web/node_modules
 web/*.tsbuildinfo
 web/scripts

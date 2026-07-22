@@ -154,13 +154,20 @@ func sourceView(detail app.SourceDetail) map[string]interface{} {
 		"lifecycle_state": detail.Source.LifecycleState, "health": detail.Source.Health,
 		"stale": detail.Stale, "draft_revision": revisionView(detail.Draft),
 		"published_revision": nil, "current_snapshot_id": nullable(detail.Source.CurrentSnapshotID),
-		"masked_location": nullable(detail.MaskedLocation),
-		"masked_proxy":    nullable(detail.MaskedProxy),
+		"masked_location":         nullable(detail.MaskedLocation),
+		"masked_proxy":            nullable(detail.MaskedProxy),
+		"consecutive_failures":    detail.ConsecutiveFailures,
+		"last_refresh_error_code": nullable(detail.LastRefreshErrorCode),
+		"next_refresh_at":         nullableTimeValue(detail.NextRefreshAt),
+		"next_retry_at":           nil,
+		"retry_scheduled":         detail.RetryScheduled,
 		"configuration": map[string]interface{}{
 			"type": detail.Config.Type, "input_format": detail.Config.InputFormat,
 			"output_format": detail.Config.OutputFormat, "minimum_nodes": detail.Config.MinimumNodes,
 			"maximum_drop_ratio":         detail.Config.MaximumDropRatio,
 			"refresh_interval_seconds":   detail.Config.RefreshIntervalSeconds,
+			"retry_count":                detail.Config.RetryCount,
+			"stale_after_seconds":        detail.Config.StaleAfterSeconds,
 			"timeout_seconds":            detail.Config.TimeoutSeconds,
 			"proxy_configured":           detail.Config.ProxyURL != "",
 			"private_network_authorized": detail.Config.PrivateNetworkAuthorized,
@@ -169,6 +176,9 @@ func sourceView(detail app.SourceDetail) map[string]interface{} {
 		},
 		"created_at": detail.Source.CreatedAt.UTC().Format(time.RFC3339Nano),
 		"updated_at": detail.Source.UpdatedAt.UTC().Format(time.RFC3339Nano),
+	}
+	if detail.RetryScheduled {
+		view["next_retry_at"] = nullableTimeValue(detail.NextRefreshAt)
 	}
 	if detail.Published != nil {
 		view["published_revision"] = revisionView(*detail.Published)

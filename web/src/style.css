@@ -129,6 +129,7 @@ tbody tr:hover { background: #fafbfa; }
 td.strong { max-width: 380px; overflow: hidden; color: #1c211e; font-weight: 650; text-overflow: ellipsis; }
 .primary-cell { max-width: min(34vw, 430px); display: grid; gap: 4px; }
 .primary-cell strong, .primary-cell small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.primary-cell small.warning { color: #9a5b00; font-weight: 600; }
 .muted { color: var(--muted); }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
 .actions { display: flex; justify-content: flex-end; gap: 5px; }

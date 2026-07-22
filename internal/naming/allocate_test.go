@@ -133,6 +133,23 @@ func TestAllocateMovesUnlockedNameWhenItBecomesReserved(t *testing.T) {
 	}
 }
 
+func TestAllocateKeepsActiveLastSeenStable(t *testing.T) {
+	firstSeen := time.Date(2026, 7, 18, 8, 0, 0, 0, time.UTC)
+	existing := []Allocation{{
+		OccurrenceID: "occ-a", BaseName: "Node", FinalName: "Node", Suffix: 1,
+		Active: true, LastSeenAt: firstSeen, Version: AlgorithmVersion,
+	}}
+	result, err := Allocate(existing, []Candidate{{
+		OccurrenceID: "occ-a", BaseName: "Node", StableKey: "source/occ-a", CandidateOrdinal: 0,
+	}}, Options{Now: firstSeen.Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := allocationByID(result.Allocations, "occ-a").LastSeenAt; !got.Equal(firstSeen) {
+		t.Fatalf("active allocation last seen changed from %s to %s", firstSeen, got)
+	}
+}
+
 func assertNames(t *testing.T, allocations []Allocation, want map[string]string) {
 	t.Helper()
 	for id, name := range want {

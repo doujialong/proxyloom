@@ -57,7 +57,8 @@ const setupCommand = 'docker compose run --rm --no-deps proxyloom bootstrap-toke
 const sourceForm = reactive({
 	display_name: '', type: 'remote', url: '', headers: '', proxy_url: '', clear_proxy: false,
 	proxy_configured: false, masked_proxy: '', content: '', input_format: 'auto', timeout_seconds: 30,
-	refresh_interval_seconds: 3600, private_network_authorized: false, health_filter_enabled: false,
+	refresh_interval_seconds: 3600, retry_count: 5, stale_after_seconds: 259200,
+	private_network_authorized: false, health_filter_enabled: false,
 })
 const collectionForm = reactive({ display_name: '', source_ids: [] as string[] })
 const pipelineForm = reactive({ display_name: '', operations: '[]' })
@@ -153,6 +154,13 @@ function formatInterval(seconds: number) {
   if (!seconds) return '手动'
   if (seconds >= 3600 && seconds % 3600 === 0) return `每 ${seconds / 3600} 小时`
   return `每 ${Math.max(1, Math.round(seconds / 60))} 分钟`
+}
+function refreshPolicy(item: Source) {
+  if (item.retry_scheduled && item.next_retry_at) {
+    return `第 ${item.consecutive_failures} 次失败 · ${formatDate(item.next_retry_at)} 重试`
+  }
+  if (item.consecutive_failures > 0) return `连续失败 ${item.consecutive_failures} 次 · 等待下个周期`
+  return `失败最多重试 ${item.configuration?.retry_count ?? 5} 次`
 }
 function healthLabel(value: string, stale = false) {
   if (stale) return '已过期'
@@ -323,6 +331,8 @@ async function openSourceEdit(source: Source) {
 		sourceForm.content = ''
     sourceForm.input_format = data.configuration?.input_format || 'auto'
 		sourceForm.refresh_interval_seconds = data.configuration?.refresh_interval_seconds ?? 3600
+		sourceForm.retry_count = data.configuration?.retry_count ?? 5
+		sourceForm.stale_after_seconds = data.configuration?.stale_after_seconds ?? 259200
 		sourceForm.timeout_seconds = data.configuration?.timeout_seconds ?? 30
     sourceForm.private_network_authorized = data.configuration?.private_network_authorized || false
     sourceForm.health_filter_enabled = data.configuration?.health_filter_enabled || false
@@ -337,6 +347,8 @@ async function saveSource() {
         display_name: sourceForm.display_name, type: sourceForm.type, input_format: sourceForm.input_format,
         output_format: 'same', minimum_nodes: 1, maximum_drop_ratio: 0.5,
 			refresh_interval_seconds: sourceForm.type === 'remote' ? sourceForm.refresh_interval_seconds : 0,
+			retry_count: sourceForm.type === 'remote' ? sourceForm.retry_count : 0,
+			stale_after_seconds: sourceForm.stale_after_seconds,
 			timeout_seconds: sourceForm.type === 'remote' ? sourceForm.timeout_seconds : 0,
         private_network_authorized: sourceForm.private_network_authorized,
         health_filter_enabled: sourceForm.health_filter_enabled,
@@ -357,6 +369,8 @@ async function saveSource() {
       const payload: Record<string, unknown> = {
         display_name: sourceForm.display_name, input_format: sourceForm.input_format,
 			refresh_interval_seconds: sourceForm.type === 'remote' ? sourceForm.refresh_interval_seconds : 0,
+			retry_count: sourceForm.type === 'remote' ? sourceForm.retry_count : 0,
+			stale_after_seconds: sourceForm.stale_after_seconds,
 			timeout_seconds: sourceForm.type === 'remote' ? sourceForm.timeout_seconds : 0,
         private_network_authorized: sourceForm.private_network_authorized,
         health_filter_enabled: sourceForm.health_filter_enabled,
@@ -572,9 +586,13 @@ async function changePassword() {
 
 async function pollJob(id: string, label: string): Promise<void> {
   for (let attempt = 0; attempt < 120; attempt++) {
-    const job = await api.get<{ status: string; error_detail?: string }>(`/api/v1/jobs/${id}`)
-    if (job.status === 'succeeded') { toast.value = `${label}完成`; return }
-    if (['failed', 'dead', 'cancelled'].includes(job.status)) throw new Error(job.error_detail || `${label}任务 ${job.status}`)
+	const job = await api.get<{ status: string; error_detail?: string; retry_scheduled?: boolean; next_retry_at?: string | null }>(`/api/v1/jobs/${id}`)
+	if (job.status === 'succeeded') { toast.value = `${label}完成`; return }
+	if (job.status === 'failed' && job.retry_scheduled) {
+	  toast.value = `${label}暂时失败，已安排 ${job.next_retry_at ? formatDate(job.next_retry_at) : '稍后'}重试`
+	  return
+	}
+	if (['failed', 'dead', 'cancelled'].includes(job.status)) throw new Error(job.error_detail || `${label}任务 ${job.status}`)
     await new Promise(resolve => setTimeout(resolve, 1000))
   }
   toast.value = `${label}仍在后台运行`
@@ -589,6 +607,7 @@ function resetSourceForm() {
 	sourceForm.display_name = ''; sourceForm.type = 'remote'; sourceForm.url = ''; sourceForm.headers = ''; sourceForm.proxy_url = ''
 	sourceForm.clear_proxy = false; sourceForm.proxy_configured = false; sourceForm.masked_proxy = ''; sourceForm.content = ''
 	sourceForm.input_format = 'auto'; sourceForm.timeout_seconds = 30; sourceForm.refresh_interval_seconds = 3600
+	sourceForm.retry_count = 5; sourceForm.stale_after_seconds = 259200
   sourceForm.private_network_authorized = false; sourceForm.health_filter_enabled = false
 }
 function resetTemplateForm() {
@@ -727,7 +746,7 @@ onMounted(initialize)
           <tbody><tr v-for="item in filteredSources" :key="item.id">
             <td><div class="primary-cell"><strong>{{ item.display_name }}</strong><small class="mono">{{ item.masked_location || '内联内容' }}</small></div></td>
             <td>{{ sourceNodeCount(item.id) }}</td>
-            <td>{{ formatInterval(item.configuration?.refresh_interval_seconds || 0) }}</td>
+			<td><div class="primary-cell"><span>{{ formatInterval(item.configuration?.refresh_interval_seconds || 0) }}</span><small :class="{ warning: item.consecutive_failures > 0 }">{{ refreshPolicy(item) }}</small></div></td>
             <td><span :class="statusClass(item.health, item.stale)">{{ healthLabel(item.health, item.stale) }}</span></td>
             <td>{{ formatDate(item.updated_at) }}</td>
             <td class="actions">
@@ -822,7 +841,7 @@ onMounted(initialize)
 		  <li><span>4</span><div><h3>创建输出</h3><p>选择聚合范围、规则模板和目标客户端。启用健康过滤后，已确认不可用的节点不会进入新产物；ECH 节点由兼容的 sing-box 1.13 执行器检查。</p><button @click="switchView('outputs')">打开输出订阅<ChevronRight :size="16" /></button></div></li>
           <li><span>5</span><div><h3>复制地址并加入客户端</h3><p>点击输出右侧“获取地址”，复制一次性展示的订阅 URL。地址包含访问凭据，不要公开；需要废弃旧地址时可在后续版本中轮换并撤销。</p></div></li>
         </ol>
-		<section class="guide-reference"><h3>常见状态</h3><dl><div><dt><span class="status healthy">健康</span></dt><dd>节点已经通过最近一次主动检查。</dd></div><div><dt><span class="status unhealthy">不可用</span></dt><dd>连续失败达到阈值，会从启用健康过滤的输出中排除。</dd></div><div><dt><span class="status neutral">客户端检查</span></dt><dd>当前容器没有相应协议或版本的兼容执行器，节点会保留给客户端检查。</dd></div><div><dt><span class="status stale">已过期</span></dt><dd>检查结论或订阅快照已经过期，需要刷新或重新检查。</dd></div></dl></section>
+		<section class="guide-reference"><h3>常见状态</h3><dl><div><dt><span class="status healthy">健康</span></dt><dd>节点已经通过最近一次主动检查。</dd></div><div><dt><span class="status unhealthy">不可用</span></dt><dd>连续失败达到阈值，会从启用健康过滤的输出中排除。</dd></div><div><dt><span class="status neutral">客户端检查</span></dt><dd>当前容器没有相应协议或版本的兼容执行器，节点会保留给客户端检查。</dd></div><div><dt><span class="status warning">等待重试</span></dt><dd>订阅刷新失败后按 1、3、10、30、60 分钟逐步重试，期间继续使用最后成功内容。</dd></div><div><dt><span class="status stale">已过期</span></dt><dd>最后成功快照超过设置的有效期；默认 72 小时，不受自动刷新周期影响。</dd></div></dl></section>
       </article>
     </main>
   </div>
@@ -843,6 +862,7 @@ onMounted(initialize)
 		<label v-if="sourceForm.type === 'remote'">{{ editingID ? '新的拉取代理（留空则保持现有代理）' : '拉取代理（可选）' }}<input v-model.trim="sourceForm.proxy_url" type="url" autocomplete="off" placeholder="socks5h://192.0.2.10:1080" /><small v-if="editingID && sourceForm.proxy_configured">当前代理：{{ sourceForm.masked_proxy }}</small></label>
 		<label v-if="editingID && sourceForm.type === 'remote' && sourceForm.proxy_configured" class="check"><input v-model="sourceForm.clear_proxy" type="checkbox" :disabled="!!sourceForm.proxy_url" />清除当前代理</label>
 		<div class="form-row"><label>输入格式<select v-model="sourceForm.input_format"><option value="auto">自动识别</option><option value="sing-box">sing-box</option><option value="mihomo">Mihomo</option><option value="client-text">Surge / Loon / QX</option><option value="uri-list">URI / Base64</option></select></label><label v-if="sourceForm.type === 'remote'">自动刷新<select v-model.number="sourceForm.refresh_interval_seconds"><option :value="0">仅手动</option><option :value="60">每 1 分钟</option><option :value="300">每 5 分钟</option><option :value="900">每 15 分钟</option><option :value="3600">每 1 小时</option><option :value="21600">每 6 小时</option><option :value="86400">每天</option></select></label></div>
+		<div class="form-row"><label v-if="sourceForm.type === 'remote'">失败重试次数<select v-model.number="sourceForm.retry_count"><option :value="0">不自动重试</option><option :value="1">1 次</option><option :value="2">2 次</option><option :value="3">3 次</option><option :value="4">4 次</option><option :value="5">5 次（推荐）</option></select></label><label>快照有效期<select v-model.number="sourceForm.stale_after_seconds"><option :value="86400">24 小时</option><option :value="259200">72 小时（推荐）</option><option :value="604800">7 天</option><option :value="2592000">30 天</option></select></label></div>
 		<label v-if="sourceForm.type === 'remote'">拉取超时（秒）<input v-model.number="sourceForm.timeout_seconds" type="number" min="1" max="120" required /></label>
         <label v-if="sourceForm.type === 'remote'" class="check"><input v-model="sourceForm.private_network_authorized" type="checkbox" />允许这个订阅访问私网地址</label>
         <label class="check"><input v-model="sourceForm.health_filter_enabled" type="checkbox" />单独输出该订阅时过滤不可用节点</label>

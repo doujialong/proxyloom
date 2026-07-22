@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/doujialong/proxyloom/internal/aggregate"
+	"github.com/doujialong/proxyloom/internal/app"
 	"github.com/doujialong/proxyloom/internal/auth"
 	"github.com/doujialong/proxyloom/internal/crypto/masterkey"
 	"github.com/doujialong/proxyloom/internal/fetcher"
@@ -252,7 +253,8 @@ func TestRemoteSourceFailureKeepsPeriodicScheduleAlive(t *testing.T) {
 	defer service.Close()
 	server := httptest.NewServer(service.api.Handler())
 	defer server.Close()
-	created := postJSON(t, server.URL+"/api/v1/sources", readAdminBearer(t, adminPath), map[string]interface{}{
+	admin := readAdminBearer(t, adminPath)
+	created := postJSON(t, server.URL+"/api/v1/sources", admin, map[string]interface{}{
 		"display_name": "periodic remote failure", "type": "remote",
 		"url": "https://127.0.0.1/subscription", "input_format": "sing-box",
 		"private_network_authorized": true, "timeout_seconds": 1, "refresh_interval_seconds": 60,
@@ -260,18 +262,162 @@ func TestRemoteSourceFailureKeepsPeriodicScheduleAlive(t *testing.T) {
 	if worked, err := service.worker.ProcessOne(context.Background()); err != nil || !worked {
 		t.Fatalf("failed periodic ProcessOne() = %v, %v", worked, err)
 	}
-	var failed, queued int
+	var failed, queued, retryJobs int
 	var delayMS int64
 	if err := service.sqlite.DB().QueryRow(`
 SELECT
   sum(CASE WHEN status = 'failed' THEN 1 ELSE 0 END),
   sum(CASE WHEN status = 'queued' THEN 1 ELSE 0 END),
+	  sum(CASE WHEN status = 'queued' AND correlation_id LIKE 'retry-1-%' THEN 1 ELSE 0 END),
   max(CASE WHEN status = 'queued' THEN due_at - created_at ELSE 0 END)
-FROM jobs WHERE source_id = ?`, requiredString(t, created, "source_id")).Scan(&failed, &queued, &delayMS); err != nil {
+FROM jobs WHERE source_id = ?`, requiredString(t, created, "source_id")).Scan(&failed, &queued, &retryJobs, &delayMS); err != nil {
 		t.Fatal(err)
 	}
-	if failed != 1 || queued != 1 || delayMS < 59_000 || delayMS > 61_000 {
-		t.Fatalf("periodic failure schedule failed=%d queued=%d delay_ms=%d", failed, queued, delayMS)
+	if failed != 1 || queued != 1 || retryJobs != 1 || delayMS < 48_000 || delayMS > 72_000 {
+		t.Fatalf("periodic failure schedule failed=%d queued=%d retry=%d delay_ms=%d", failed, queued, retryJobs, delayMS)
+	}
+	jobRequest, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/jobs/"+requiredString(t, created, "job_id"), nil)
+	jobRequest.Header.Set("Authorization", "Bearer "+admin)
+	jobResponse, err := http.DefaultClient.Do(jobRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobView := decodeResponseJSON(t, jobResponse)
+	if jobResponse.StatusCode != http.StatusOK || jobView["retry_scheduled"] != true || jobView["next_retry_at"] == nil {
+		t.Fatalf("failed job retry view status=%d body=%v", jobResponse.StatusCode, jobView)
+	}
+	sourceID := requiredString(t, created, "source_id")
+	for retryNumber := 1; retryNumber <= app.DefaultSourceRetryCount; retryNumber++ {
+		if _, err := service.sqlite.DB().Exec(`UPDATE jobs SET due_at = ? WHERE source_id = ? AND status = 'queued'`, time.Now().Add(-time.Second).UnixMilli(), sourceID); err != nil {
+			t.Fatal(err)
+		}
+		if worked, err := service.worker.ProcessOne(context.Background()); err != nil || !worked {
+			t.Fatalf("retry %d ProcessOne() = %v, %v", retryNumber, worked, err)
+		}
+		var correlation string
+		if err := service.sqlite.DB().QueryRow(`SELECT correlation_id FROM jobs WHERE source_id = ? AND status = 'queued'`, sourceID).Scan(&correlation); err != nil {
+			t.Fatal(err)
+		}
+		expectedPrefix := "schedule-after-failure-"
+		if retryNumber < app.DefaultSourceRetryCount {
+			expectedPrefix = fmt.Sprintf("retry-%d-", retryNumber+1)
+		}
+		if !strings.HasPrefix(correlation, expectedPrefix) {
+			t.Fatalf("retry %d next correlation = %q, want prefix %q", retryNumber, correlation, expectedPrefix)
+		}
+	}
+	if _, err := service.sqlite.DB().Exec(`UPDATE jobs SET due_at = ? WHERE source_id = ? AND status = 'queued'`, time.Now().Add(-time.Second).UnixMilli(), sourceID); err != nil {
+		t.Fatal(err)
+	}
+	if worked, err := service.worker.ProcessOne(context.Background()); err != nil || !worked {
+		t.Fatalf("next periodic ProcessOne() = %v, %v", worked, err)
+	}
+	var restartedCorrelation string
+	if err := service.sqlite.DB().QueryRow(`SELECT correlation_id FROM jobs WHERE source_id = ? AND status = 'queued'`, sourceID).Scan(&restartedCorrelation); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(restartedCorrelation, "retry-1-") {
+		t.Fatalf("next periodic retry correlation = %q", restartedCorrelation)
+	}
+}
+
+func TestRefreshScheduleReconciliationRepairsLostChainAndStopsOldRevision(t *testing.T) {
+	root := t.TempDir()
+	secrets := filepath.Join(root, "secrets")
+	if err := os.Mkdir(secrets, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	masterPath := filepath.Join(secrets, "master.key")
+	if _, err := masterkey.Generate(masterPath, masterkey.GenerateOptions{Random: rand.Reader}); err != nil {
+		t.Fatal(err)
+	}
+	adminPath := filepath.Join(secrets, "admin.token")
+	if err := auth.Generate(adminPath, auth.GenerateOptions{Random: rand.Reader}); err != nil {
+		t.Fatal(err)
+	}
+	service, err := Open(context.Background(), Config{
+		DataDir: filepath.Join(root, "data"), MasterKeyPath: masterPath,
+		AdminTokenPath: adminPath, Listen: "127.0.0.1:0", Development: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	server := httptest.NewServer(service.api.Handler())
+	defer server.Close()
+	created := postJSON(t, server.URL+"/api/v1/sources", readAdminBearer(t, adminPath), map[string]interface{}{
+		"display_name": "reconciled remote", "type": "remote",
+		"url": "https://example.test/subscription", "input_format": "sing-box",
+		"timeout_seconds": 10, "refresh_interval_seconds": 60,
+	})
+	sourceID := requiredString(t, created, "source_id")
+	oldJob, err := service.jobs.Get(context.Background(), requiredString(t, created, "job_id"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, config, err := service.manager.CurrentSourceConfig(context.Background(), sourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := service.manager.UpdateSourceAt(
+		context.Background(), sourceID, detail.Source.DisplayName, detail.Source.UpdatedAt, config,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.manager.ReconcileRefreshSchedules(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	oldJob, err = service.jobs.Get(context.Background(), oldJob.ID)
+	if err != nil || oldJob.Status != "dead" || oldJob.ErrorCode != "superseded_revision" {
+		t.Fatalf("old revision job = %+v, %v", oldJob, err)
+	}
+	currentJob, err := service.jobs.Get(context.Background(), updated.Job.ID)
+	if err != nil || currentJob.Status != "queued" {
+		t.Fatalf("current revision job = %+v, %v", currentJob, err)
+	}
+	next, err := service.manager.NextRefreshAfterFailure(context.Background(), sourceID, oldJob.SourceRevisionID, errors.New("fixture failure"))
+	if err != nil || next.At != nil {
+		t.Fatalf("superseded revision next refresh = %v, %v", next, err)
+	}
+	if _, err := service.sqlite.DB().Exec(`
+UPDATE jobs SET status = 'dead', error_code = 'test_chain_loss', finished_at = ? WHERE id = ?`,
+		time.Now().UTC().UnixMilli(), currentJob.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.manager.ReconcileRefreshSchedules(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var active int
+	if err := service.sqlite.DB().QueryRow(`
+SELECT count(*) FROM jobs
+WHERE source_id = ? AND source_revision_id = ? AND status IN ('queued', 'leased', 'running')`,
+		sourceID, updated.Revision.ID).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if active != 1 {
+		t.Fatalf("active current revision jobs = %d, want 1", active)
+	}
+	manual := postJSON(t, server.URL+"/api/v1/sources", readAdminBearer(t, adminPath), map[string]interface{}{
+		"display_name": "manual remote", "type": "remote",
+		"url": "https://example.test/manual", "input_format": "sing-box", "timeout_seconds": 10,
+	})
+	if _, err := service.sqlite.DB().Exec(`
+UPDATE jobs SET status = 'dead', error_code = 'test_chain_loss', finished_at = ? WHERE id = ?`,
+		time.Now().UTC().UnixMilli(), requiredString(t, manual, "job_id")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.manager.ReconcileRefreshSchedules(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.sqlite.DB().QueryRow(`
+SELECT count(*) FROM jobs
+WHERE source_id = ? AND status IN ('queued', 'leased', 'running')`,
+		requiredString(t, manual, "source_id")).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if active != 0 {
+		t.Fatalf("manual source active jobs = %d, want 0", active)
 	}
 }
 
@@ -345,6 +491,31 @@ func TestManagedOutputAggregatesStableNamesTemplateAndRestart(t *testing.T) {
 	}, http.StatusCreated)
 	firstBuild := postJSONWithStatus(t, server.URL+"/api/v1/outputs/"+requiredString(t, output, "id")+"/builds", admin, map[string]interface{}{}, http.StatusAccepted)
 	processOutputBuild(t, service, firstBuild, "succeeded")
+	firstOutput, err := service.outputs.Output(context.Background(), requiredString(t, output, "id"))
+	if err != nil || firstOutput.AllocationBlobID == "" {
+		t.Fatalf("first output allocation = %+v, %v", firstOutput, err)
+	}
+	var artifactsBeforeRepeat, blobsBeforeRepeat int
+	if err := service.sqlite.DB().QueryRow(`SELECT count(*) FROM managed_output_artifacts WHERE output_id = ?`, firstOutput.ID).Scan(&artifactsBeforeRepeat); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.sqlite.DB().QueryRow(`SELECT count(*) FROM encrypted_blobs`).Scan(&blobsBeforeRepeat); err != nil {
+		t.Fatal(err)
+	}
+	repeated, err := service.aggregate.Build(context.Background(), firstOutput.ID)
+	if err != nil || repeated.Changed || repeated.Artifact.ID != firstOutput.CurrentArtifactID {
+		t.Fatalf("unchanged managed build = %+v, %v", repeated, err)
+	}
+	var artifactsAfterRepeat, blobsAfterRepeat int
+	if err := service.sqlite.DB().QueryRow(`SELECT count(*) FROM managed_output_artifacts WHERE output_id = ?`, firstOutput.ID).Scan(&artifactsAfterRepeat); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.sqlite.DB().QueryRow(`SELECT count(*) FROM encrypted_blobs`).Scan(&blobsAfterRepeat); err != nil {
+		t.Fatal(err)
+	}
+	if artifactsAfterRepeat != artifactsBeforeRepeat || blobsAfterRepeat != blobsBeforeRepeat {
+		t.Fatalf("unchanged managed build wrote history: artifacts %d->%d blobs %d->%d", artifactsBeforeRepeat, artifactsAfterRepeat, blobsBeforeRepeat, blobsAfterRepeat)
+	}
 	if err := service.aggregate.EnqueueForTemplate(context.Background(), requiredString(t, template, "id")); err != nil {
 		t.Fatal(err)
 	}
@@ -401,6 +572,16 @@ WHERE output_id = ? AND trigger_kind = 'health_boundary'`, requiredString(t, out
 		t.Fatalf("regex template marker did not select the expected stable name: %s", beforeContent)
 	}
 	automaticRefresh := postJSON(t, server.URL+"/api/v1/sources/"+firstID+"/refresh", admin, map[string]interface{}{})
+	var snapshotsBeforeRefresh, sourceArtifactsBeforeRefresh, blobsBeforeRefresh int
+	if err := service.sqlite.DB().QueryRow(`SELECT count(*) FROM snapshots WHERE source_id = ?`, firstID).Scan(&snapshotsBeforeRefresh); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.sqlite.DB().QueryRow(`SELECT count(*) FROM artifacts WHERE source_id = ?`, firstID).Scan(&sourceArtifactsBeforeRefresh); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.sqlite.DB().QueryRow(`SELECT count(*) FROM encrypted_blobs`).Scan(&blobsBeforeRefresh); err != nil {
+		t.Fatal(err)
+	}
 	worked, err := service.worker.ProcessOne(context.Background())
 	if err != nil || !worked {
 		t.Fatalf("automatic output source refresh worker = %v, %v", worked, err)
@@ -409,16 +590,28 @@ WHERE output_id = ? AND trigger_kind = 'health_boundary'`, requiredString(t, out
 	if err != nil || sourceJob.Status != "succeeded" {
 		t.Fatalf("automatic output source job = %+v, %v", sourceJob, err)
 	}
-	var automaticBuildID, automaticTrigger string
+	var queuedBuilds, snapshotsAfterRefresh, sourceArtifactsAfterRefresh, blobsAfterRefresh int
 	if err := service.sqlite.DB().QueryRow(`
-SELECT id, trigger_kind FROM managed_output_build_jobs
-WHERE output_id = ? AND status = 'queued'`, requiredString(t, output, "id")).Scan(&automaticBuildID, &automaticTrigger); err != nil {
+SELECT count(*) FROM managed_output_build_jobs
+WHERE output_id = ? AND status = 'queued'`, requiredString(t, output, "id")).Scan(&queuedBuilds); err != nil {
 		t.Fatal(err)
 	}
-	if automaticTrigger != "source_refresh" {
-		t.Fatalf("automatic managed output trigger = %q", automaticTrigger)
+	if err := service.sqlite.DB().QueryRow(`SELECT count(*) FROM snapshots WHERE source_id = ?`, firstID).Scan(&snapshotsAfterRefresh); err != nil {
+		t.Fatal(err)
 	}
-	processOutputBuild(t, service, map[string]interface{}{"id": automaticBuildID}, "succeeded")
+	if err := service.sqlite.DB().QueryRow(`SELECT count(*) FROM artifacts WHERE source_id = ?`, firstID).Scan(&sourceArtifactsAfterRefresh); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.sqlite.DB().QueryRow(`SELECT count(*) FROM encrypted_blobs`).Scan(&blobsAfterRefresh); err != nil {
+		t.Fatal(err)
+	}
+	if queuedBuilds != 0 || snapshotsAfterRefresh != snapshotsBeforeRefresh || sourceArtifactsAfterRefresh != sourceArtifactsBeforeRefresh || blobsAfterRefresh != blobsBeforeRefresh {
+		t.Fatalf("unchanged source refresh wrote history: builds=%d snapshots %d->%d artifacts %d->%d blobs %d->%d",
+			queuedBuilds, snapshotsBeforeRefresh, snapshotsAfterRefresh, sourceArtifactsBeforeRefresh, sourceArtifactsAfterRefresh, blobsBeforeRefresh, blobsAfterRefresh)
+	}
+	if _, _, err := service.outputs.Blob(context.Background(), firstOutput.AllocationBlobID); err != nil {
+		t.Fatalf("unchanged build removed active allocation: %v", err)
+	}
 
 	collectionURL := server.URL + "/api/v1/collections/" + requiredString(t, collection, "id")
 	getCollection, _ := http.NewRequest(http.MethodGet, collectionURL, nil)
@@ -1478,6 +1671,73 @@ func TestExpiredWorkerLeaseIsRequeued(t *testing.T) {
 	if err != nil || requeued.Status != "queued" || requeued.Attempt != 1 {
 		t.Fatalf("requeued job = %+v, %v", requeued, err)
 	}
+}
+
+func TestWorkerRecoversLeaseThatExpiresAfterStartup(t *testing.T) {
+	root := t.TempDir()
+	secrets := filepath.Join(root, "secrets")
+	if err := os.Mkdir(secrets, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	masterPath := filepath.Join(secrets, "master.key")
+	if _, err := masterkey.Generate(masterPath, masterkey.GenerateOptions{Random: rand.Reader}); err != nil {
+		t.Fatal(err)
+	}
+	adminPath := filepath.Join(secrets, "admin.token")
+	if err := auth.Generate(adminPath, auth.GenerateOptions{Random: rand.Reader}); err != nil {
+		t.Fatal(err)
+	}
+	service, err := Open(context.Background(), Config{
+		DataDir: filepath.Join(root, "data"), MasterKeyPath: masterPath,
+		AdminTokenPath: adminPath, Listen: "127.0.0.1:0", Development: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	server := httptest.NewServer(service.api.Handler())
+	defer server.Close()
+	created := postJSON(t, server.URL+"/api/v1/sources", readAdminBearer(t, adminPath), map[string]interface{}{
+		"display_name": "lease after startup", "type": "inline",
+		"content": "ss://fixture@example.com:443#Node\n",
+	})
+	jobID := requiredString(t, created, "job_id")
+	job, exists, err := service.jobs.Claim(context.Background(), "crashed-worker", 50*time.Millisecond)
+	if err != nil || !exists || job.ID != jobID {
+		t.Fatalf("Claim() = %+v, %v, %v", job, exists, err)
+	}
+	if _, err := service.jobs.MarkRunning(context.Background(), job.ID, "crashed-worker"); err != nil {
+		t.Fatal(err)
+	}
+	worker, err := app.NewWorker(service.manager, service.jobs, app.WorkerOptions{
+		Owner: "replacement-worker", PollInterval: 5 * time.Millisecond,
+		MaintenanceInterval: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- worker.Run(ctx) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		current, getErr := service.jobs.Get(context.Background(), jobID)
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		if current.Status == "succeeded" {
+			cancel()
+			if runErr := <-done; runErr != nil {
+				t.Fatal(runErr)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	t.Fatal("worker did not recover and complete the expired job")
 }
 
 func TestRefreshSchedulesSupportedAndUnsupportedNodeHealth(t *testing.T) {

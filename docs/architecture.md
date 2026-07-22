@@ -84,7 +84,7 @@ create/refresh request -> durable Job -> SSRF-safe fetch
   -> enqueue affected builds / health checks
 ```
 
-拉取失败或有效性门槛失败只写 Refresh Attempt，不切换 `current_snapshot_id`。从未成功的来源不能以空列表参与构建。条件请求 `304` 记录成功刷新，但复用已有 Snapshot，不复制 Raw Document。
+拉取失败或有效性门槛失败只写 Refresh Attempt，不切换 `current_snapshot_id`。远程来源把连续失败次数和下次重试保存到 Refresh Attempt 与 durable Job；默认按约 1、3、10、30、60 分钟退避，`Retry-After` 在上限内优先采用，容器重启不会丢失重试链。快照陈旧期限独立于刷新周期，默认 72 小时。从未成功的来源不能以空列表参与构建。条件请求 `304` 记录成功刷新，但复用已有 Snapshot，不复制 Raw Document。
 
 远程 Template 使用同一 SSRF、重定向、超时、响应大小和请求头策略。模板首次创建必须成功拉取并通过完整配置、无代理节点、占位符和引用校验；周期或手工刷新先在内存中验证，只有内容摘要变化时才切换模板修订并给关联 Output 排队。失败继续读取加密保存的最近有效模板，调度器按有上限的指数退避重试，重启后从资源更新时间和刷新周期恢复计划。
 

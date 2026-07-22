@@ -63,6 +63,7 @@ type EnqueueRequest struct {
 	Priority         int
 	MaxAttempts      int
 	CorrelationID    string
+	ExpediteExisting bool
 }
 
 func New(database *sql.DB, options Options) (*Store, error) {
@@ -90,9 +91,10 @@ func (s *Store) Enqueue(ctx context.Context, request EnqueueRequest) (Job, error
 		return Job{}, fmt.Errorf("job ID generator returned an invalid ID")
 	}
 	now := s.now().UTC()
+	dedupeKey := request.SourceID + ":" + request.SourceRevisionID
 	job := Job{
 		ID: id, SourceID: request.SourceID, SourceRevisionID: request.SourceRevisionID,
-		Status: StatusQueued, Priority: request.Priority, DedupeKey: request.SourceID,
+		Status: StatusQueued, Priority: request.Priority, DedupeKey: dedupeKey,
 		MaxAttempts: request.MaxAttempts, CorrelationID: request.CorrelationID,
 		DueAt: request.DueAt.UTC(), CreatedAt: now,
 	}
@@ -111,8 +113,17 @@ INSERT INTO jobs(
 	lookupErr := s.database.QueryRowContext(ctx, `
 SELECT id FROM jobs
 WHERE job_type = 'source_refresh' AND dedupe_key = ?
-  AND status IN ('queued', 'leased', 'running')`, request.SourceID).Scan(&existingID)
+  AND status IN ('queued', 'leased', 'running')`, dedupeKey).Scan(&existingID)
 	if lookupErr == nil {
+		if request.ExpediteExisting {
+			if _, updateErr := s.database.ExecContext(ctx, `
+UPDATE jobs
+	SET due_at = MIN(due_at, ?), priority = MAX(priority, ?), correlation_id = ?
+WHERE id = ? AND status = 'queued'`,
+				job.DueAt.UnixMilli(), job.Priority, job.CorrelationID, existingID); updateErr != nil {
+				return Job{}, fmt.Errorf("expedite queued source refresh: %w", updateErr)
+			}
+		}
 		return s.Get(ctx, existingID)
 	}
 	return Job{}, fmt.Errorf("enqueue source refresh: %w", err)
@@ -177,6 +188,28 @@ func (s *Store) Fail(ctx context.Context, id, owner, code, detail string) (Job, 
 	return s.finish(ctx, id, owner, StatusFailed, code, detail)
 }
 
+func (s *Store) CancelQueuedSuperseded(ctx context.Context, sourceID, currentRevisionID string) (int64, error) {
+	if !validID(sourceID) || !validID(currentRevisionID) {
+		return 0, ErrNotFound
+	}
+	now := s.now().UTC()
+	result, err := s.database.ExecContext(ctx, `
+UPDATE jobs
+SET status = 'dead', error_code = 'superseded_revision',
+    error_detail = 'queued refresh belongs to a superseded source revision',
+    finished_at = ?
+WHERE job_type = 'source_refresh' AND source_id = ? AND source_revision_id <> ?
+  AND status = 'queued'`, now.UnixMilli(), sourceID, currentRevisionID)
+	if err != nil {
+		return 0, fmt.Errorf("cancel superseded refresh jobs: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("count cancelled superseded refresh jobs: %w", err)
+	}
+	return count, nil
+}
+
 func (s *Store) finish(ctx context.Context, id, owner string, status Status, code, detail string) (Job, error) {
 	now := s.now().UTC()
 	result, err := s.database.ExecContext(ctx, `
@@ -237,6 +270,28 @@ FROM jobs WHERE id = ?`, id))
 		return Job{}, fmt.Errorf("read refresh job: %w", err)
 	}
 	return job, nil
+}
+
+func (s *Store) ActiveForSource(ctx context.Context, sourceID, revisionID string) (Job, bool, error) {
+	if !validID(sourceID) || !validID(revisionID) {
+		return Job{}, false, ErrNotFound
+	}
+	job, err := scanJob(s.database.QueryRowContext(ctx, `
+SELECT id, source_id, source_revision_id, status, priority, dedupe_key,
+       COALESCE(lease_owner, ''), lease_expires_at, attempt, max_attempts,
+       COALESCE(error_code, ''), COALESCE(error_detail, ''), correlation_id,
+       due_at, created_at, started_at, finished_at
+FROM jobs
+WHERE source_id = ? AND source_revision_id = ?
+  AND status IN ('queued', 'leased', 'running')
+ORDER BY due_at, created_at, id LIMIT 1`, sourceID, revisionID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Job{}, false, nil
+	}
+	if err != nil {
+		return Job{}, false, fmt.Errorf("read active source refresh job: %w", err)
+	}
+	return job, true, nil
 }
 
 type scanner interface {
