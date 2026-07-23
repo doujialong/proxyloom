@@ -531,7 +531,11 @@ func (c *Cleaner) pruneInactiveHealth(ctx context.Context) (int64, int64, error)
 DELETE FROM probe_queue_items
 WHERE status IN ('dormant', 'queued')
   AND node_occurrence_id IN (
-    SELECT id FROM node_occurrences WHERE lifecycle_state <> 'present'
+    SELECT occurrence.id
+    FROM node_occurrences occurrence
+    JOIN sources source ON source.id = occurrence.source_id
+    WHERE occurrence.lifecycle_state <> 'present'
+       OR source.lifecycle_state <> 'active'
   )`)
 	if err != nil {
 		return 0, 0, fmt.Errorf("prune inactive health queues: %w", err)
@@ -539,7 +543,11 @@ WHERE status IN ('dormant', 'queued')
 	states, err := tx.ExecContext(ctx, `
 DELETE FROM node_health_states
 WHERE node_occurrence_id IN (
-  SELECT id FROM node_occurrences WHERE lifecycle_state <> 'present'
+  SELECT occurrence.id
+  FROM node_occurrences occurrence
+  JOIN sources source ON source.id = occurrence.source_id
+  WHERE occurrence.lifecycle_state <> 'present'
+     OR source.lifecycle_state <> 'active'
 )
 AND NOT EXISTS (
   SELECT 1 FROM probe_queue_items queue

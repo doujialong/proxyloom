@@ -181,6 +181,7 @@ SELECT so.node_occurrence_id, rn.protocol_id, rn.format_id,
        rn.raw_blob_id, COALESCE(cn.canonical_blob_id, '')
 FROM snapshot_occurrences so
 JOIN snapshots sn ON sn.id = so.snapshot_id
+JOIN sources source ON source.id = sn.source_id AND source.lifecycle_state = 'active'
 JOIN raw_nodes rn ON rn.id = so.raw_node_id
 LEFT JOIN canonical_nodes cn ON cn.raw_node_id = rn.id
 WHERE so.snapshot_id = ? AND sn.source_id = ?
@@ -494,7 +495,15 @@ func (s *Store) ManualEnqueue(ctx context.Context, occurrenceID string) error {
 UPDATE probe_queue_items
 SET status = 'queued', priority_class = 'manual', priority = 1000,
     due_at = ?, lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
-WHERE node_occurrence_id = ? AND status IN ('dormant', 'queued')`, now.UnixMilli(), now.UnixMilli(), occurrenceID)
+WHERE node_occurrence_id = ? AND status IN ('dormant', 'queued')
+  AND EXISTS (
+    SELECT 1
+    FROM node_occurrences occurrence
+    JOIN sources source ON source.id = occurrence.source_id
+    WHERE occurrence.id = probe_queue_items.node_occurrence_id
+      AND occurrence.lifecycle_state = 'present'
+      AND source.lifecycle_state = 'active'
+  )`, now.UnixMilli(), now.UnixMilli(), occurrenceID)
 	if err != nil {
 		return fmt.Errorf("enqueue manual node check: %w", err)
 	}
@@ -524,6 +533,7 @@ SELECT o.id, o.source_id, f.protocol_id, f.kind,
        o.lifecycle_state, COALESCE(h.state, 'unchecked'),
        COALESCE(h.stale, 1), o.last_seen_at, COALESCE(h.updated_at, o.updated_at)
 FROM node_occurrences o
+JOIN sources source ON source.id = o.source_id AND source.lifecycle_state = 'active'
 JOIN fingerprints f ON f.id = o.current_fingerprint_id
 LEFT JOIN node_health_states h ON h.node_occurrence_id = o.id
 WHERE 1 = 1`
@@ -655,7 +665,9 @@ SELECT count(*),
        COALESCE(sum(CASE WHEN status = 'dormant' THEN 1 ELSE 0 END), 0)
 FROM probe_queue_items queue
 JOIN node_occurrences occurrence ON occurrence.id = queue.node_occurrence_id
-WHERE occurrence.lifecycle_state = 'present'`).Scan(&capacity.Total, &capacity.Queued, &capacity.Running, &capacity.Dormant)
+JOIN sources source ON source.id = occurrence.source_id
+WHERE occurrence.lifecycle_state = 'present'
+  AND source.lifecycle_state = 'active'`).Scan(&capacity.Total, &capacity.Queued, &capacity.Running, &capacity.Dormant)
 	if err != nil {
 		return Capacity{}, fmt.Errorf("read health queue capacity: %w", err)
 	}

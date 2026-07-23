@@ -3,6 +3,7 @@ package healthstore
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -85,6 +86,7 @@ func TestNodeOverviewAndCapacityExcludeInactiveOccurrences(t *testing.T) {
 	database.SetMaxOpenConns(1)
 	if _, err := database.Exec(`
 CREATE TABLE fingerprints(id TEXT PRIMARY KEY, protocol_id TEXT, kind TEXT);
+CREATE TABLE sources(id TEXT PRIMARY KEY, lifecycle_state TEXT NOT NULL);
 CREATE TABLE node_occurrences(
   id TEXT PRIMARY KEY, source_id TEXT, current_fingerprint_id TEXT,
   lifecycle_state TEXT, last_seen_at INTEGER, updated_at INTEGER
@@ -92,7 +94,11 @@ CREATE TABLE node_occurrences(
 CREATE TABLE node_health_states(
   node_occurrence_id TEXT PRIMARY KEY, state TEXT, stale INTEGER, updated_at INTEGER
 );
-CREATE TABLE probe_queue_items(node_occurrence_id TEXT PRIMARY KEY, status TEXT);
+CREATE TABLE probe_queue_items(
+  node_occurrence_id TEXT PRIMARY KEY, status TEXT,
+  priority_class TEXT, priority INTEGER, due_at INTEGER,
+  lease_owner TEXT, lease_expires_at INTEGER, updated_at INTEGER
+);
 CREATE TABLE snapshot_occurrences(snapshot_id TEXT, raw_node_id TEXT, node_occurrence_id TEXT);
 CREATE TABLE snapshots(id TEXT PRIMARY KEY, accepted_at INTEGER);
 CREATE TABLE raw_nodes(id TEXT PRIMARY KEY, original_name_blob_id TEXT, source_ordinal INTEGER);
@@ -102,13 +108,17 @@ CREATE TABLE raw_nodes(id TEXT PRIMARY KEY, original_name_blob_id TEXT, source_o
 	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
 	if _, err := database.Exec(`
 INSERT INTO fingerprints VALUES ('fingerprint', 'vless', 'semantic');
-INSERT INTO node_occurrences VALUES ('present', 'source', 'fingerprint', 'present', ?, ?);
-INSERT INTO node_occurrences VALUES ('absent', 'source', 'fingerprint', 'absent', ?, ?);
+INSERT INTO sources VALUES ('active-source', 'active'), ('archived-source', 'archived');
+INSERT INTO node_occurrences VALUES ('present', 'active-source', 'fingerprint', 'present', ?, ?);
+INSERT INTO node_occurrences VALUES ('absent', 'active-source', 'fingerprint', 'absent', ?, ?);
+INSERT INTO node_occurrences VALUES ('archived', 'archived-source', 'fingerprint', 'present', ?, ?);
 INSERT INTO node_health_states VALUES ('present', 'unhealthy', 0, ?);
 INSERT INTO node_health_states VALUES ('absent', 'unhealthy', 0, ?);
-INSERT INTO probe_queue_items VALUES ('present', 'queued');
-INSERT INTO probe_queue_items VALUES ('absent', 'queued');
-`, now.UnixMilli(), now.UnixMilli(), now.Add(-time.Hour).UnixMilli(), now.UnixMilli(), now.UnixMilli(), now.UnixMilli()); err != nil {
+INSERT INTO node_health_states VALUES ('archived', 'unhealthy', 0, ?);
+INSERT INTO probe_queue_items VALUES ('present', 'queued', 'periodic', 100, 0, NULL, NULL, 0);
+INSERT INTO probe_queue_items VALUES ('absent', 'queued', 'periodic', 100, 0, NULL, NULL, 0);
+INSERT INTO probe_queue_items VALUES ('archived', 'queued', 'periodic', 100, 0, NULL, NULL, 0);
+`, now.UnixMilli(), now.UnixMilli(), now.Add(-time.Hour).UnixMilli(), now.UnixMilli(), now.Add(-2*time.Hour).UnixMilli(), now.UnixMilli(), now.UnixMilli(), now.UnixMilli(), now.UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
 	store, err := New(database, Options{Now: func() time.Time { return now }, NewID: func() string { return "id" }})
@@ -121,10 +131,16 @@ INSERT INTO probe_queue_items VALUES ('absent', 'queued');
 	}
 	all, _, err := store.ListNodes(context.Background(), NodeListOptions{Limit: 10})
 	if err != nil || len(all) != 2 {
-		t.Fatalf("all ListNodes() = %+v, %v", all, err)
+		t.Fatalf("active-source ListNodes() = %+v, %v", all, err)
 	}
 	capacity, err := store.Capacity(context.Background())
 	if err != nil || capacity.Total != 1 || capacity.Queued != 1 {
 		t.Fatalf("Capacity() = %+v, %v", capacity, err)
+	}
+	if err := store.ManualEnqueue(context.Background(), "present"); err != nil {
+		t.Fatalf("active ManualEnqueue() error = %v", err)
+	}
+	if err := store.ManualEnqueue(context.Background(), "archived"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("archived ManualEnqueue() error = %v, want conflict", err)
 	}
 }

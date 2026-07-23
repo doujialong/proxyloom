@@ -16,6 +16,10 @@ The project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 - Persistent source refresh retries with bounded backoff, `Retry-After` handling, and an independent snapshot stale window.
 - Administrator setup, session authentication, encrypted storage, managed backups, and the Vue management interface.
 
+### Fixed
+
+- Archived sources now retire their node occurrences and are excluded from node listings, manual probes, health capacity, snapshot synchronization, and retention queues.
+
 ### Security
 
 - Non-root read-only container defaults, CSRF protection, encrypted sensitive blobs, SSRF controls, and separate master-key storage.

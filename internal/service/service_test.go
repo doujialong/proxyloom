@@ -1598,6 +1598,15 @@ func TestAdministratorBrowserSessionAndCSRF(t *testing.T) {
 	if archiveResponse.StatusCode != http.StatusNoContent {
 		t.Fatalf("source archive status=%d", archiveResponse.StatusCode)
 	}
+	var presentArchivedNodes int
+	if err := service.sqlite.DB().QueryRow(`
+SELECT count(*) FROM node_occurrences
+WHERE source_id = ? AND lifecycle_state = 'present'`, sourceID).Scan(&presentArchivedNodes); err != nil {
+		t.Fatal(err)
+	}
+	if presentArchivedNodes != 0 {
+		t.Fatalf("archived source retained %d present nodes", presentArchivedNodes)
+	}
 	job, err := service.jobs.Get(context.Background(), jobID)
 	if err != nil || job.Status != "succeeded" {
 		t.Fatalf("archived source completed job = %+v, %v", job, err)

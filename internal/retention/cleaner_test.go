@@ -138,21 +138,29 @@ INSERT INTO refresh_attempts VALUES ('attempt-not-modified', 'snapshot-01');
 
 func TestPruneInactiveHealthKeepsCurrentNodes(t *testing.T) {
 	database := openRetentionDatabase(t, `
-CREATE TABLE node_occurrences(id TEXT PRIMARY KEY, lifecycle_state TEXT NOT NULL);
+CREATE TABLE sources(id TEXT PRIMARY KEY, lifecycle_state TEXT NOT NULL);
+CREATE TABLE node_occurrences(id TEXT PRIMARY KEY, source_id TEXT NOT NULL, lifecycle_state TEXT NOT NULL);
 CREATE TABLE probe_queue_items(node_occurrence_id TEXT PRIMARY KEY, status TEXT NOT NULL);
 CREATE TABLE node_health_states(node_occurrence_id TEXT PRIMARY KEY);
 `)
 	defer database.Close()
 	if _, err := database.Exec(`
-INSERT INTO node_occurrences VALUES ('present', 'present'), ('absent', 'absent');
-INSERT INTO probe_queue_items VALUES ('present', 'queued'), ('absent', 'dormant');
-INSERT INTO node_health_states VALUES ('present'), ('absent');
+INSERT INTO sources VALUES ('active', 'active'), ('archived', 'archived');
+INSERT INTO node_occurrences VALUES
+  ('present', 'active', 'present'),
+  ('absent', 'active', 'absent'),
+  ('archived-present', 'archived', 'present');
+INSERT INTO probe_queue_items VALUES
+  ('present', 'queued'),
+  ('absent', 'dormant'),
+  ('archived-present', 'queued');
+INSERT INTO node_health_states VALUES ('present'), ('absent'), ('archived-present');
 `); err != nil {
 		t.Fatal(err)
 	}
 	cleaner := newTestCleaner(t, database, Options{})
 	queues, states, err := cleaner.pruneInactiveHealth(context.Background())
-	if err != nil || queues != 1 || states != 1 {
+	if err != nil || queues != 2 || states != 2 {
 		t.Fatalf("pruneInactiveHealth() = %d, %d, %v", queues, states, err)
 	}
 	for _, table := range []string{"probe_queue_items", "node_health_states"} {

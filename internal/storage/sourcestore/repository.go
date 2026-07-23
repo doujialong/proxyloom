@@ -1200,6 +1200,12 @@ WHERE id = ? AND lifecycle_state = 'active' AND updated_at = ?`,
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return Source{}, ErrConflict
 	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE node_occurrences
+SET lifecycle_state = 'retired', updated_at = ?
+WHERE source_id = ? AND lifecycle_state <> 'retired'`, now.UnixMilli(), sourceID); err != nil {
+		return Source{}, fmt.Errorf("retire archived source nodes: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return Source{}, fmt.Errorf("commit source archive: %w", err)
 	}

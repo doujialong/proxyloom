@@ -99,6 +99,10 @@ func TestSourceSnapshotLifecycleKeepsLastValidSnapshot(t *testing.T) {
 	if err != nil || reused.ID != snapshot.ID || completed.AcceptedSnapshotID != snapshot.ID {
 		t.Fatalf("CompleteNotModified() = %+v, %+v, %v", reused, completed, err)
 	}
+	refreshedSource, err := environment.repository.GetSource(context.Background(), source.ID)
+	if err != nil || !refreshedSource.UpdatedAt.Equal(environment.now) {
+		t.Fatalf("source freshness after 304 = %+v, %v", refreshedSource, err)
+	}
 	failureState, err = environment.repository.RefreshFailures(context.Background(), source.ID, published.Published.ID, 10)
 	if err != nil || failureState.ConsecutiveFailures != 0 || failureState.LastErrorCode != "" {
 		t.Fatalf("refresh failures after success = %+v, %v", failureState, err)
@@ -121,6 +125,10 @@ func TestSourceSnapshotLifecycleKeepsLastValidSnapshot(t *testing.T) {
 	})
 	if err != nil || reused.ID != snapshot.ID || completed.Status != AttemptSucceeded || completed.AcceptedSnapshotID != snapshot.ID {
 		t.Fatalf("CompleteUnchanged() = %+v, %+v, %v", reused, completed, err)
+	}
+	refreshedSource, err = environment.repository.GetSource(context.Background(), source.ID)
+	if err != nil || !refreshedSource.UpdatedAt.Equal(environment.now) {
+		t.Fatalf("source freshness after unchanged 200 = %+v, %v", refreshedSource, err)
 	}
 	if err := environment.database.QueryRow("SELECT count(*) FROM snapshots WHERE source_id = ?", source.ID).Scan(&snapshots); err != nil {
 		t.Fatal(err)
